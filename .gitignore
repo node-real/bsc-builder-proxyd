@@ -1,0 +1,10 @@
+.env
+.DS_Store
+CLAUDE.md
+config.toml
+
+.idea/
+.vscode/
+.cursor/
+.claude/
+bin/
