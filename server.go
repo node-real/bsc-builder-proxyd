@@ -76,6 +76,7 @@ type Server struct {
 	cache                  RPCCache
 	srvMu                  sync.Mutex
 	rateLimitHeader        string
+	ethCallOverrideRules   []EthCallRule
 }
 
 type limiterFunc func(method string) bool
@@ -99,6 +100,7 @@ func NewServer(
 	maxRequestBodyLogLen int,
 	maxBatchSize int,
 	limiterFactory limiterFactoryFunc,
+	ethCallOverrideRules []EthCallRule,
 ) (*Server, error) {
 	if cache == nil {
 		cache = &NoopRPCCache{}
@@ -191,6 +193,7 @@ func NewServer(
 		limExemptOrigins:       limExemptOrigins,
 		limExemptUserAgents:    limExemptUserAgents,
 		rateLimitHeader:        rateLimitHeader,
+		ethCallOverrideRules:   ethCallOverrideRules,
 	}, nil
 }
 
@@ -432,6 +435,14 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 			RecordRPCForward(ctx, BackendProxyd, "eth_accounts", RPCRequestSourceHTTP)
 			responses[i] = NewRPCRes(parsedReq.ID, emptyArrayResponse)
 			continue
+		}
+
+		if parsedReq.Method == "eth_call" {
+			if result := s.checkEthCallOverride(ctx, parsedReq); result != nil {
+				RecordRPCForward(ctx, BackendProxyd, "eth_call", RPCRequestSourceHTTP)
+				responses[i] = NewRPCRes(parsedReq.ID, result)
+				continue
+			}
 		}
 
 		group := s.rpcMethodMappings[parsedReq.Method]
@@ -877,4 +888,49 @@ func createBatchRequest(elems []batchElem) []*RPCReq {
 		batch[i] = elems[i].Req
 	}
 	return batch
+}
+
+func (s *Server) checkEthCallOverride(ctx context.Context, req *RPCReq) json.RawMessage {
+	if len(s.ethCallOverrideRules) == 0 {
+		return nil
+	}
+
+	var params []interface{}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		log.Debug("error unmarshalling eth_call params", "err", err, "req_id", GetReqID(ctx))
+		return nil
+	}
+
+	if len(params) == 0 {
+		return nil
+	}
+
+	callObj, ok := params[0].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	toAddr, ok := callObj["to"].(string)
+	if !ok {
+		return nil
+	}
+
+	value, ok := callObj["value"].(string)
+	if !ok {
+		// Default to "0x0" if value is not specified
+		value = "0x0"
+	}
+
+	for _, rule := range s.ethCallOverrideRules {
+		if strings.EqualFold(toAddr, rule.Address) && strings.EqualFold(value, rule.Value) {
+			log.Debug("eth_call override match found",
+				"req_id", GetReqID(ctx),
+				"to", toAddr,
+				"value", value,
+			)
+			return json.RawMessage(rule.Result)
+		}
+	}
+
+	return nil
 }
