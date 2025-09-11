@@ -1,11 +1,11 @@
 # List of WS methods to whitelist.
-ws_method_whitelist = [
-  "eth_subscribe",
-  "eth_call",
-  "eth_chainId"
-]
+# ws_method_whitelist = [
+#  "eth_subscribe",
+#  "eth_call",
+#  "eth_chainId"
+# ]
 # Enable WS on this backend group. There can only be one WS-enabled backend group.
-ws_backend_group = "main"
+# ws_backend_group = "main"
 
 [server]
 # Host for the proxyd RPC server to listen on.
@@ -16,7 +16,7 @@ rpc_port = 8080
 ws_host = "0.0.0.0"
 # Port for the above
 # Set the ws_port to 0 to disable WS
-ws_port = 8085
+ws_port = 0
 # Maximum client body size, in bytes, that the server will accept.
 max_body_size_bytes = 10485760
 max_concurrent_rpcs = 1000
@@ -53,10 +53,10 @@ max_error_rate_threshold = 0.3
 
 [backends]
 # A map of backends by name.
-[backends.infura]
+[backends.nodereal]
 # The URL to contact the backend at. Will be read from the environment
 # if an environment variable prefixed with $ is provided.
-rpc_url = ""
+rpc_url = "https://bsc-mainnet-builder.nodereal.io"
 # The WS URL to contact the backend at. Will be read from the environment
 # if an environment variable prefixed with $ is provided.
 ws_url = ""
@@ -64,32 +64,24 @@ username = ""
 # An HTTP Basic password to authenticate with the backend. Will be read from
 # the environment if an environment variable prefixed with $ is provided.
 password = ""
-max_rps = 3
-max_ws_conns = 1
+# max_rps = 3
+# max_ws_conns = 1
 # Path to a custom root CA.
 ca_file = ""
 # Path to a custom client cert file.
 client_cert_file = ""
 # Path to a custom client key file.
 client_key_file = ""
-# Allows backends to skip peer count checking, default false
-# consensus_skip_peer_count = true
-# Specified the target method to get receipts, default "debug_getRawReceipts"
-# See https://github.com/ethereum-optimism/optimism/blob/186e46a47647a51a658e699e9ff047d39444c2de/op-node/sources/receipts.go#L186-L253
-consensus_receipts_target = "eth_getBlockReceipts"
 
-[backends.alchemy]
-rpc_url = ""
-ws_url = ""
-username = ""
-password = ""
-max_rps = 3
-max_ws_conns = 1
-consensus_receipts_target = "alchemy_getTransactionReceipts"
+[backends.48club]
+rpc_url = "https://puissant-builder.48.club/"
+
+[backends.blockrazor]
+rpc_url = "https://rpc.blockrazor.builders/"
 
 [backend_groups]
 [backend_groups.main]
-backends = ["infura"]
+backends = ["nodereal", "48club", "blockrazor"]
 # Enable consensus awareness for backend group, making it act as a load balancer, default false
 # consensus_aware = true
 # Period in which the backend wont serve requests if banned, default 5m
@@ -103,8 +95,12 @@ backends = ["infura"]
 # Minimum peer count, default 3
 # consensus_min_peer_count = 4
 
-[backend_groups.alchemy]
-backends = ["alchemy"]
+# A backend group that uses the "multicall" routing strategy
+# to fan out requests to all backends in the group and return
+# the first successful response.
+[backend_groups.broadcast_group]
+backends = ["nodereal", "48club", "blockrazor"]
+routing_strategy = "multicall"
 
 # If the authentication group below is in the config,
 # proxyd will only accept authenticated requests.
@@ -118,6 +114,36 @@ secret = "test"
 
 # Mapping of methods to backend groups.
 [rpc_method_mappings]
-eth_call = "main"
+# wallet support
+eth_blockNumber = "main"
 eth_chainId = "main"
-eth_blockNumber = "alchemy"
+eth_gasPrice = "main"
+eth_getBalance = "main"
+eth_getBlockByNumber = "main"
+eth_getTransactionCount = "main"
+eth_getTransactionReceipt = "main"
+eth_maxPriorityFeePerGas = "main"
+net_version = "main"
+
+eth_call = "main"
+eth_estimateGas = "main"
+eth_sendRawTransaction = "broadcast_group"
+
+[eth_call_override]
+# 48Club
+[[eth_call_override.rules]]
+address = "0x0000000000000000000000000000000000000048"
+value = "0x30"
+result = "\"0x30\""
+
+# Blockrazor
+[[eth_call_override.rules]]
+address = "0x0000000000000000000000000000000000000100"
+value = "0x64"
+result = "\"0x64\""
+
+[rate_limit]
+base_rate = 5
+base_interval = "1s"
+# exempt_origins = ["https://admin.example.com"]
+# exempt_user_agents = []

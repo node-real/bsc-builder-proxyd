@@ -1,6 +1,14 @@
-# rpc-proxy
+# bsc-builder-proxyd
 
-This tool implements `proxyd`, an RPC request router and proxy. It does the following things:
+This tool implements `proxyd`, an RPC request router and proxy for BSC Builder. It is based on the [ethereum-optimism/infra proxyd](https://github.com/ethereum-optimism/infra/tree/main/proxyd) service and has been modified to integrate with bsc-builder's mev-guard functionality.
+
+## Original Source
+
+This repository is a fork of the `proxyd` service from the [ethereum-optimism/infra](https://github.com/ethereum-optimism/infra) repository. The original service has been enhanced to support BSC Builder's MEV protection mechanisms.
+
+## Key Features
+
+This proxy does the following things:
 
 1. Whitelists RPC methods.
 2. Routes RPC methods to groups of backend services.
@@ -10,6 +18,38 @@ This tool implements `proxyd`, an RPC request router and proxy. It does the foll
 6. Load balance requests across backend services.
 7. Cache immutable responses from backends.
 8. Provides metrics to measure request latency, error rates, and the like.
+9. **Override eth_call responses** for MEV guard verification (BSC Builder enhancement).
+
+
+## eth_call Override (BSC Builder Enhancement)
+
+This version of `proxyd` includes a special feature for MEV guard verification that allows overriding `eth_call` responses based on specific address and data combinations.
+
+### Configuration
+
+To configure `eth_call` overrides, add the following section to your configuration file:
+
+```toml
+[eth_call_override]
+[[eth_call_override.rules]]
+address = "0x1234567890123456789012345678901234567890"
+value = "0x0"
+result = "\"0x0000000000000000000000000000000000000000000000000000000000000001\""
+
+[[eth_call_override.rules]]
+address = "0x0987654321098765432109876543210987654321"
+value = "0x1000000000000000000"
+result = "\"0x0000000000000000000000000000000000000000000000000000000000000000\""
+```
+
+### How it works
+
+When an `eth_call` request is received:
+1. The proxy checks if the request's `to` address and `value` fields match any configured rules
+2. If a match is found, the predefined `result` is returned immediately without forwarding to backends
+3. If no match is found, the request is processed normally through the backend services
+
+The matching is case-insensitive for both address and value fields. If no `value` is specified in the request, it defaults to "0x0".
 
 
 ## Usage
@@ -88,51 +128,6 @@ Cache use Redis and can be enabled for the following immutable methods:
 * `eth_getTransactionByBlockHashAndIndex`
 * `eth_getUncleByBlockHashAndIndex`
 * `debug_getRawReceipts` (block hash only)
-
-## Meta method `consensus_getReceipts`
-
-To support backends with different specifications in the same backend group,
-proxyd exposes a convenient method to fetch receipts abstracting away
-what specific backend will serve the request.
-
-Each backend specifies their preferred method to fetch receipts with `consensus_receipts_target` config,
-which will be translated from `consensus_getReceipts`.
-
-This method takes a `blockNumberOrHash` (i.e. `tag|qty|hash`)
-and returns the receipts for all transactions in the block.
-
-Request example
-```json
-{
-  "jsonrpc":"2.0",
-  "id": 1,
-  "params": ["0xc6ef2fc5426d6ad6fd9e2a26abeab0aa2411b7ab17f30a99d3cb96aed1d1055b"]
-}
-```
-
-It currently supports translation to the following targets:
-* `debug_getRawReceipts(blockOrHash)` (default)
-* `alchemy_getTransactionReceipts(blockOrHash)`
-* `parity_getBlockReceipts(blockOrHash)`
-* `eth_getBlockReceipts(blockOrHash)`
-
-The selected target is returned in the response, in a wrapped result.
-
-Response example
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "method": "debug_getRawReceipts",
-    "result": {
-      // the actual raw result from backend
-    }
-  }
-}
-```
-
-See [op-node receipt fetcher](https://github.com/ethereum-optimism/optimism/blob/186e46a47647a51a658e699e9ff047d39444c2de/op-node/sources/receipts.go#L186-L253).
 
 
 ## Metrics

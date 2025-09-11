@@ -1,6 +1,5 @@
 FROM golang:1.21.3-alpine3.18 as builder
 
-
 RUN apk add make jq git gcc musl-dev linux-headers
 
 COPY ./proxyd /app
