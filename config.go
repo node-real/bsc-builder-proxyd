@@ -204,6 +204,16 @@ type SenderRateLimitConfig struct {
 	AllowedChainIds []*big.Int `toml:"allowed_chain_ids"`
 }
 
+type EthCallRule struct {
+	Address string `toml:"address"`
+	Value   string `toml:"value"`
+	Result  string `toml:"result"`
+}
+
+type EthCallOverrideConfig struct {
+	Rules []EthCallRule `toml:"rules"`
+}
+
 type Config struct {
 	WSBackendGroup        string                `toml:"ws_backend_group"`
 	Server                ServerConfig          `toml:"server"`
@@ -220,6 +230,7 @@ type Config struct {
 	WSMethodWhitelist     []string              `toml:"ws_method_whitelist"`
 	WhitelistErrorMessage string                `toml:"whitelist_error_message"`
 	SenderRateLimit       SenderRateLimitConfig `toml:"sender_rate_limit"`
+	EthCallOverride       EthCallOverrideConfig `toml:"eth_call_override"`
 }
 
 func ReadFromEnvOrConfig(value string) (string, error) {
