@@ -262,9 +262,10 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	origin := r.Header.Get("Origin")
-	host := r.Header.Get("Host")
 	userAgent := r.Header.Get("User-Agent")
-	log.Info("test: Request info", "origin", origin, "host", host, "user_agent", userAgent)
+	for key, value := range r.Header {
+		log.Info("test: Request header", "key", key, "value", value)
+	}
 	// Use XFF in context since it will automatically be replaced by the remote IP
 	xff := stripXFF(GetXForwardedFor(ctx))
 	isUnlimitedOrigin := s.isUnlimitedOrigin(origin)
