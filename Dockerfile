@@ -1,8 +1,8 @@
-FROM golang:1.21.3-alpine3.18 as builder
+FROM golang:1.21.3-alpine3.18 AS builder
 
 RUN apk add make jq git gcc musl-dev linux-headers
 
-COPY ./proxyd /app
+COPY . /app
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ FROM alpine:3.18
 
 RUN apk add bind-tools jq curl bash git redis
 
-COPY ./proxyd/entrypoint.sh /bin/entrypoint.sh
+COPY ./entrypoint.sh /bin/entrypoint.sh
 
 RUN apk update && \
     apk add ca-certificates && \
