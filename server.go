@@ -261,7 +261,8 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel = context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	origin := r.Header.Get("Origin")
+	// origin := r.Header.Get("Origin")
+	origin := r.Header.Get("X-Forwarded-Host")
 	userAgent := r.Header.Get("User-Agent")
 	// Use XFF in context since it will automatically be replaced by the remote IP
 	xff := stripXFF(GetXForwardedFor(ctx))
