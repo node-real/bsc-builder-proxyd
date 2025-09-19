@@ -817,7 +817,7 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 
 func isValidMulticallTx(rpcReqs []*RPCReq) bool {
 	if len(rpcReqs) == 1 {
-		if rpcReqs[0].Method == "eth_sendRawTransaction" {
+		if rpcReqs[0].Method == "eth_sendRawTransaction" || rpcReqs[0].Method == "eth_sendBundle" {
 			return true
 		}
 	}
