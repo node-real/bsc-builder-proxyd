@@ -11,13 +11,14 @@ import (
 )
 
 type ServerConfig struct {
-	RPCHost           string `toml:"rpc_host"`
-	RPCPort           int    `toml:"rpc_port"`
-	WSHost            string `toml:"ws_host"`
-	WSPort            int    `toml:"ws_port"`
-	MaxBodySizeBytes  int64  `toml:"max_body_size_bytes"`
-	MaxConcurrentRPCs int64  `toml:"max_concurrent_rpcs"`
-	LogLevel          string `toml:"log_level"`
+	RPCHost                    string `toml:"rpc_host"`
+	RPCPort                    int    `toml:"rpc_port"`
+	WSHost                     string `toml:"ws_host"`
+	WSPort                     int    `toml:"ws_port"`
+	MaxBodySizeBytes           int64  `toml:"max_body_size_bytes"`
+	MaxConcurrentRPCs          int64  `toml:"max_concurrent_rpcs"`
+	MaxConcurrentConsensusRPCs int64  `toml:"max_concurrent_consensus_rpcs"`
+	LogLevel                   string `toml:"log_level"`
 
 	// TimeoutSeconds specifies the maximum time spent serving an HTTP request. Note that isn't used for websocket connections
 	TimeoutSeconds int `toml:"timeout_seconds"`
@@ -120,7 +121,6 @@ type BackendsConfig map[string]*BackendConfig
 type RoutingStrategy string
 
 func (b *BackendGroupConfig) ValidateRoutingStrategy(bgName string) bool {
-
 	// If Consensus Aware is Set and Routing RoutingStrategy is populated fail
 	if b.ConsensusAware && b.RoutingStrategy != "" {
 		log.Warn("consensus_aware is now deprecated, please use routing_strategy = consensus_aware")
