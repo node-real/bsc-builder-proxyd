@@ -61,7 +61,7 @@ func Start(config *Config) (*Server, func(), error) {
 
 	// redis read replica client
 	// if read endpoint is not set, use primary endpoint
-	var redisReadClient = redisClient
+	redisReadClient := redisClient
 	if config.Redis.ReadURL != "" {
 		if redisClient == nil {
 			return nil, nil, errors.New("must specify a Redis primary URL. only read endpoint is set")
@@ -116,6 +116,12 @@ func Start(config *Config) (*Server, func(), error) {
 		maxConcurrentRPCs = math.MaxInt64
 	}
 	rpcRequestSemaphore := semaphore.NewWeighted(maxConcurrentRPCs)
+
+	maxConcurrentConsensusRPCs := config.Server.MaxConcurrentConsensusRPCs
+	if maxConcurrentConsensusRPCs == 0 {
+		maxConcurrentConsensusRPCs = math.MaxInt64
+	}
+	consensusRequestSemaphore := semaphore.NewWeighted(maxConcurrentConsensusRPCs)
 
 	backendNames := make([]string, 0)
 	backendsByName := make(map[string]*Backend)
@@ -207,7 +213,7 @@ func Start(config *Config) (*Server, func(), error) {
 		}
 		opts = append(opts, WithConsensusReceiptTarget(receiptsTarget))
 
-		back := NewBackend(name, rpcURL, wsURL, rpcRequestSemaphore, opts...)
+		back := NewBackend(name, rpcURL, wsURL, rpcRequestSemaphore, consensusRequestSemaphore, opts...)
 		backendNames = append(backendNames, name)
 		backendsByName[name] = back
 		log.Info("configured backend",

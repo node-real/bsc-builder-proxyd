@@ -142,6 +142,7 @@ type Backend struct {
 	authPassword         string
 	headers              map[string]string
 	client               *LimitedHTTPClient
+	consensusSemaphore   *semaphore.Weighted
 	dialer               *websocket.Dialer
 	maxRetries           int
 	maxResponseSize      int64
@@ -316,6 +317,7 @@ func NewBackend(
 	rpcURL string,
 	wsURL string,
 	rpcSemaphore *semaphore.Weighted,
+	consensusSemaphore *semaphore.Weighted,
 	opts ...BackendOpt,
 ) *Backend {
 	backend := &Backend{
@@ -328,7 +330,8 @@ func NewBackend(
 			sem:         rpcSemaphore,
 			backendName: name,
 		},
-		dialer: &websocket.Dialer{},
+		consensusSemaphore: consensusSemaphore,
+		dialer:             &websocket.Dialer{},
 
 		maxLatencyThreshold:         10 * time.Second,
 		maxDegradedLatencyThreshold: 5 * time.Second,
@@ -380,7 +383,7 @@ func (b *Backend) Forward(ctx context.Context, reqs []*RPCReq, isBatch bool) ([]
 			"max_attempts", b.maxRetries+1,
 			"method", metricLabelMethod,
 		)
-		res, err := b.doForward(ctx, reqs, isBatch)
+		res, err := b.doForward(ctx, reqs, isBatch, nil)
 		switch err {
 		case nil: // do nothing
 		case ErrBackendResponseTooLarge:
@@ -466,7 +469,9 @@ func (b *Backend) ForwardRPC(ctx context.Context, res *RPCRes, id string, method
 		ID:      []byte(id),
 	}
 
-	slicedRes, err := b.doForward(ctx, []*RPCReq{&rpcReq}, false)
+	// Use a dedicated semaphore for consensus health checks so they don't contend with
+	// user traffic requests.
+	slicedRes, err := b.doForward(ctx, []*RPCReq{&rpcReq}, false, b.consensusSemaphore)
 	if err != nil {
 		return err
 	}
@@ -482,7 +487,7 @@ func (b *Backend) ForwardRPC(ctx context.Context, res *RPCRes, id string, method
 	return nil
 }
 
-func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool) ([]*RPCRes, error) {
+func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool, sem *semaphore.Weighted) ([]*RPCRes, error) {
 	// we are concerned about network error rates, so we record 1 request independently of how many are in the batch
 	b.networkRequestsSlidingWindow.Incr()
 
@@ -581,7 +586,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	}
 
 	start := time.Now()
-	httpRes, err := b.client.DoLimited(httpReq)
+	httpRes, err := b.client.DoWithSemaphore(httpReq, sem)
 	if err != nil {
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
@@ -1326,11 +1331,21 @@ type LimitedHTTPClient struct {
 }
 
 func (c *LimitedHTTPClient) DoLimited(req *http.Request) (*http.Response, error) {
-	if err := c.sem.Acquire(req.Context(), 1); err != nil {
-		tooManyRequestErrorsTotal.WithLabelValues(c.backendName).Inc()
-		return nil, wrapErr(err, "too many requests")
+	return c.DoWithSemaphore(req, c.sem)
+}
+
+func (c *LimitedHTTPClient) DoWithSemaphore(req *http.Request, sem *semaphore.Weighted) (*http.Response, error) {
+	usedSem := sem
+	if usedSem == nil {
+		usedSem = c.sem
 	}
-	defer c.sem.Release(1)
+	if usedSem != nil {
+		if err := usedSem.Acquire(req.Context(), 1); err != nil {
+			tooManyRequestErrorsTotal.WithLabelValues(c.backendName).Inc()
+			return nil, wrapErr(err, "too many requests")
+		}
+		defer usedSem.Release(1)
+	}
 	return c.Do(req)
 }
 
