@@ -846,8 +846,27 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 		"auth", GetAuthCtx(bgCtx),
 	)
 	var wg sync.WaitGroup
-	ch := make(chan *multicallTuple, len(bg.Backends))
+	targets := make([]*Backend, 0, len(bg.Backends))
 	for _, backend := range bg.Backends {
+		if backend.IsHealthy() {
+			targets = append(targets, backend)
+			continue
+		}
+		log.Info("skipping unhealthy backend for multicall",
+			"req_id", GetReqID(bgCtx),
+			"auth", GetAuthCtx(bgCtx),
+			"backend", backend.Name,
+		)
+	}
+	if len(targets) == 0 {
+		log.Warn("no healthy backends for multicall; falling back to all candidates",
+			"req_id", GetReqID(bgCtx),
+			"auth", GetAuthCtx(bgCtx),
+		)
+		targets = bg.Backends
+	}
+	ch := make(chan *multicallTuple, len(targets))
+	for _, backend := range targets {
 		wg.Add(1)
 		go bg.MulticallRequest(backend, rpcReqs, &wg, bgCtx, ch)
 	}
