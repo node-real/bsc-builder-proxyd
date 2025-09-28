@@ -253,6 +253,8 @@ func (s *Server) HandleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
+	printHeader("receive-0", r)
+
 	ctx := s.populateContext(w, r)
 	if ctx == nil {
 		return
@@ -329,6 +331,8 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 			"auth", GetAuthCtx(ctx),
 		)
 	}
+
+	printHeader("receive-1", r)
 
 	if IsBatch(body) {
 		reqs, err := ParseBatchRPCReq(body)
