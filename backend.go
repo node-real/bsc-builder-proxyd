@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	sw "github.com/ethereum-optimism/infra/proxyd/pkg/avg-sliding-window"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -25,6 +24,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/xaionaro-go/weightedshuffle"
 	"golang.org/x/sync/semaphore"
+
+	sw "github.com/ethereum-optimism/infra/proxyd/pkg/avg-sliding-window"
 )
 
 const (
@@ -583,6 +584,11 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 
 	for name, value := range b.headers {
 		httpReq.Header.Set(name, value)
+	}
+
+	txSource := GetTxSource(ctx)
+	if txSource != "" {
+		httpReq.Header.Set(XTxSource, txSource)
 	}
 
 	start := time.Now()
