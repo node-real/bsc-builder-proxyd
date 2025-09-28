@@ -153,8 +153,6 @@ func NewServer(
 
 	if rateLimitConfig.ExemptBaseRate > 0 {
 		exemptLim = limiterFactory(time.Duration(rateLimitConfig.ExemptBaseInterval), rateLimitConfig.ExemptBaseRate, "exempt")
-	} else {
-		exemptLim = NoopFrontendRateLimiter
 	}
 
 	overrideLims := make(map[string]FrontendRateLimiter)
