@@ -151,6 +151,11 @@ result = "\"0x64\""
 [rate_limit]
 base_rate = 1000
 base_interval = "60s"
+
+### Maximum rate applied to traffic that matches exempt lists.
+# Set to 0 to allow exempt traffic to bypass limiting entirely.
+exempt_base_rate = 2000
+exempt_base_interval = "1s"
 # exempt_origins = ["https://admin.example.com"]
 # exempt_user_agents = []
 

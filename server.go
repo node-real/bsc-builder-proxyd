@@ -65,6 +65,7 @@ type Server struct {
 	enableServedByHeader   bool
 	upgrader               *websocket.Upgrader
 	mainLim                FrontendRateLimiter
+	exemptLim              FrontendRateLimiter
 	overrideLims           map[string]FrontendRateLimiter
 	senderLim              FrontendRateLimiter
 	allowedChainIds        []*big.Int
@@ -127,6 +128,7 @@ func NewServer(
 	}
 
 	var mainLim FrontendRateLimiter
+	var exemptLim FrontendRateLimiter
 	limExemptOrigins := make([]*regexp.Regexp, 0)
 	limExemptUserAgents := make([]*regexp.Regexp, 0)
 	if rateLimitConfig.BaseRate > 0 {
@@ -147,6 +149,10 @@ func NewServer(
 		}
 	} else {
 		mainLim = NoopFrontendRateLimiter
+	}
+
+	if rateLimitConfig.ExemptBaseRate > 0 {
+		exemptLim = limiterFactory(time.Duration(rateLimitConfig.ExemptBaseInterval), rateLimitConfig.ExemptBaseRate, "exempt")
 	}
 
 	overrideLims := make(map[string]FrontendRateLimiter)
@@ -186,6 +192,7 @@ func NewServer(
 			HandshakeTimeout: defaultWSHandshakeTimeout,
 		},
 		mainLim:                mainLim,
+		exemptLim:              exemptLim,
 		overrideLims:           overrideLims,
 		globallyLimitedMethods: globalMethodLims,
 		senderLim:              senderLim,
@@ -277,7 +284,15 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	isLimited := func(method string) bool {
 		isGloballyLimitedMethod := s.isGlobalLimit(method)
 		if !isGloballyLimitedMethod && (isUnlimitedOrigin || isUnlimitedUserAgent) {
-			return false
+			if s.exemptLim == nil {
+				return false
+			}
+			ok, err := s.exemptLim.Take(ctx, xff)
+			if err != nil {
+				log.Warn("error taking exempt rate limit", "err", err)
+				return true
+			}
+			return !ok
 		}
 
 		var lim FrontendRateLimiter
