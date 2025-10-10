@@ -33,6 +33,7 @@ const (
 	ContextKeyReqID              = "req_id"
 	ContextKeyXForwardedFor      = "x_forwarded_for"
 	ContextKeyOpTxProxyAuth      = "op_txproxy_auth"
+	ContextKeyOrigin             = "x_forwarded_host"
 	DefaultOpTxProxyAuthHeader   = "X-Optimism-Signature"
 	DefaultMaxBatchRPCCallsLimit = 100
 	MaxBatchRPCCallsHardLimit    = 1000
@@ -65,7 +66,7 @@ type Server struct {
 	enableServedByHeader   bool
 	upgrader               *websocket.Upgrader
 	mainLim                FrontendRateLimiter
-	exemptLim              FrontendRateLimiter
+	exemptLims             map[string]FrontendRateLimiter
 	overrideLims           map[string]FrontendRateLimiter
 	senderLim              FrontendRateLimiter
 	allowedChainIds        []*big.Int
@@ -128,7 +129,6 @@ func NewServer(
 	}
 
 	var mainLim FrontendRateLimiter
-	var exemptLim FrontendRateLimiter
 	limExemptOrigins := make([]*regexp.Regexp, 0)
 	limExemptUserAgents := make([]*regexp.Regexp, 0)
 	if rateLimitConfig.BaseRate > 0 {
@@ -151,8 +151,16 @@ func NewServer(
 		mainLim = NoopFrontendRateLimiter
 	}
 
-	if rateLimitConfig.ExemptBaseRate > 0 {
-		exemptLim = limiterFactory(time.Duration(rateLimitConfig.ExemptBaseInterval), rateLimitConfig.ExemptBaseRate, "exempt")
+	var exemptLims map[string]FrontendRateLimiter
+	if len(limExemptOrigins) > 0 {
+		exemptLims = make(map[string]FrontendRateLimiter)
+		for _, origin := range limExemptOrigins {
+			if override, ok := rateLimitConfig.ExemptOverrides[origin.String()]; ok {
+				exemptLims[origin.String()] = limiterFactory(time.Duration(override.Interval), override.Limit, origin.String())
+			} else {
+				exemptLims[origin.String()] = limiterFactory(time.Duration(rateLimitConfig.ExemptBaseInterval), rateLimitConfig.ExemptBaseRate, origin.String())
+			}
+		}
 	}
 
 	overrideLims := make(map[string]FrontendRateLimiter)
@@ -192,7 +200,7 @@ func NewServer(
 			HandshakeTimeout: defaultWSHandshakeTimeout,
 		},
 		mainLim:                mainLim,
-		exemptLim:              exemptLim,
+		exemptLims:             exemptLims,
 		overrideLims:           overrideLims,
 		globallyLimitedMethods: globalMethodLims,
 		senderLim:              senderLim,
@@ -284,12 +292,36 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	isLimited := func(method string) bool {
 		isGloballyLimitedMethod := s.isGlobalLimit(method)
 		if !isGloballyLimitedMethod && (isUnlimitedOrigin || isUnlimitedUserAgent) {
-			if s.exemptLim == nil {
+			matchedKey := ""
+			if isUnlimitedOrigin {
+				for _, pat := range s.limExemptOrigins {
+					if pat.MatchString(origin) {
+						matchedKey = pat.String()
+						break
+					}
+				}
+			} else if isUnlimitedUserAgent {
+				for _, pat := range s.limExemptUserAgents {
+					if pat.MatchString(userAgent) {
+						matchedKey = pat.String()
+						break
+					}
+				}
+			}
+
+			if matchedKey == "" {
 				return false
 			}
-			ok, err := s.exemptLim.Take(ctx, xff)
+
+			exemptLim, ok := s.exemptLims[matchedKey]
+			if !ok || exemptLim == nil {
+				return false
+			}
+
+			// Aggregate exempt traffic as a whole group using a constant key
+			ok, err := exemptLim.Take(ctx, "exempt")
 			if err != nil {
-				log.Warn("error taking exempt rate limit", "err", err)
+				log.Warn("error taking exempt rate limit", "err", err, "origin", origin)
 				return true
 			}
 			return !ok
@@ -666,6 +698,9 @@ func (s *Server) populateContext(w http.ResponseWriter, r *http.Request) context
 		ctx = context.WithValue(ctx, ContextKeyAuth, s.authenticatedPaths[authorization]) // nolint:staticcheck
 	}
 
+	origin := r.Header.Get("X-Forwarded-Host")
+	ctx = context.WithValue(ctx, ContextKeyOrigin, origin) // nolint:staticcheck
+
 	return context.WithValue(
 		ctx,
 		ContextKeyReqID, // nolint:staticcheck
@@ -834,6 +869,14 @@ func GetAuthCtx(ctx context.Context) string {
 	}
 
 	return authUser
+}
+
+func GetOriginCtx(ctx context.Context) string {
+	origin, ok := ctx.Value(ContextKeyOrigin).(string)
+	if !ok {
+		return ""
+	}
+	return origin
 }
 
 func GetOpTxProxyAuthHeader(ctx context.Context) string {

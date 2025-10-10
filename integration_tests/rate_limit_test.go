@@ -55,6 +55,28 @@ func TestFrontendMaxRPSLimit(t *testing.T) {
 		require.Equal(t, 3, codes[200])
 	})
 
+	time.Sleep(time.Second)
+
+	// Exempt traffic aggregation should not depend on IP: multiple IPs share the same exempt bucket
+	t.Run("exempt origin aggregates across IPs", func(t *testing.T) {
+		h1 := make(http.Header)
+		h1.Set("X-Forwarded-Host", "exempt_origin")
+		h1.Set("X-Forwarded-For", "2.2.2.2")
+		client1 := NewProxydClientWithHeaders("http://127.0.0.1:8545", h1)
+
+		h2 := make(http.Header)
+		h2.Set("X-Forwarded-Host", "exempt_origin")
+		h2.Set("X-Forwarded-For", "3.3.3.3")
+		client2 := NewProxydClientWithHeaders("http://127.0.0.1:8545", h2)
+
+		// Both clients should be allowed up to the exempt base rate collectively. With test config, exempt allows bypass (3 all pass).
+		_, codes1 := spamReqs(t, client1, ethChainID, 429, 2)
+		require.Equal(t, 2, codes1[200])
+		_, code2, err := client2.SendRPC(ethChainID, nil)
+		require.Equal(t, 200, code2)
+		require.NoError(t, err)
+	})
+
 	t.Run("multiple xff", func(t *testing.T) {
 		h1 := make(http.Header)
 		h1.Set("X-Forwarded-For", "0.0.0.0")
