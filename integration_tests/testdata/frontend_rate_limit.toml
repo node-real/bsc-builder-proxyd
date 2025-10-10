@@ -25,6 +25,10 @@ exempt_origins = ["exempt_origin"]
 exempt_user_agents = ["exempt_agent"]
 error_message = "over rate limit with special message"
 
+[rate_limit.exempt_overrides.exempt_origin]
+limit = 3
+interval = "1s"
+
 [rate_limit.method_overrides.eth_foobar]
 limit = 1
 interval = "1s"
