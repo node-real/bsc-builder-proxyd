@@ -155,6 +155,7 @@ func NewServer(
 	if len(limExemptOrigins) > 0 {
 		exemptLims = make(map[string]FrontendRateLimiter)
 		for _, origin := range limExemptOrigins {
+			log.Info("test: init config", "origin", origin.String())
 			if override, ok := rateLimitConfig.ExemptOverrides[origin.String()]; ok {
 				exemptLims[origin.String()] = limiterFactory(time.Duration(override.Interval), override.Limit, origin.String())
 			} else {
@@ -310,11 +311,14 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if matchedKey == "" {
+				log.Info("test: no matchedKey", "origin", origin, "user_agent", userAgent)
 				return false
 			}
+			log.Info("test: matchedKey", "origin", origin, "user_agent", userAgent, "key", matchedKey)
 
 			exemptLim, ok := s.exemptLims[matchedKey]
 			if !ok || exemptLim == nil {
+				log.Info("test: no exemptLim", "origin", origin, "user_agent", userAgent, "key", matchedKey)
 				return false
 			}
 
