@@ -704,11 +704,11 @@ func (s *Server) populateContext(w http.ResponseWriter, r *http.Request) context
 	ctx = context.WithValue(ctx, ContextKeyOrigin, origin) // nolint:staticcheck
 
 	// Host and X-Forwarded-Host are domain name, such as: bsc-mainnet-builder-ap.nodereal.io
-	backrunSource := firstNonEmpty(
+	txSource := firstNonEmpty(
 		r.Host,
 		r.Header.Get("X-Forwarded-Host"),
 	)
-	ctx = context.WithValue(ctx, XTxSource, backrunSource)
+	ctx = context.WithValue(ctx, XTxSource, txSource)
 
 	return context.WithValue(
 		ctx,
