@@ -33,6 +33,7 @@ const (
 	ContextKeyReqID              = "req_id"
 	ContextKeyXForwardedFor      = "x_forwarded_for"
 	ContextKeyOpTxProxyAuth      = "op_txproxy_auth"
+	ContextKeyOrigin             = "x_forwarded_host"
 	DefaultOpTxProxyAuthHeader   = "X-Optimism-Signature"
 	DefaultMaxBatchRPCCallsLimit = 100
 	MaxBatchRPCCallsHardLimit    = 1000
@@ -46,6 +47,8 @@ const (
 	maxRequestBodyLogLen         = 2000
 	defaultMaxUpstreamBatchSize  = 10
 	defaultRateLimitHeader       = "X-Forwarded-For"
+
+	XTxSource = "X-Tx-Source"
 )
 
 var emptyArrayResponse = json.RawMessage("[]")
@@ -65,6 +68,7 @@ type Server struct {
 	enableServedByHeader   bool
 	upgrader               *websocket.Upgrader
 	mainLim                FrontendRateLimiter
+	exemptLims             map[string]FrontendRateLimiter
 	overrideLims           map[string]FrontendRateLimiter
 	senderLim              FrontendRateLimiter
 	allowedChainIds        []*big.Int
@@ -149,6 +153,18 @@ func NewServer(
 		mainLim = NoopFrontendRateLimiter
 	}
 
+	var exemptLims map[string]FrontendRateLimiter
+	if len(limExemptOrigins) > 0 {
+		exemptLims = make(map[string]FrontendRateLimiter)
+		for _, origin := range limExemptOrigins {
+			if override, ok := rateLimitConfig.ExemptOverrides[origin.String()]; ok {
+				exemptLims[origin.String()] = limiterFactory(time.Duration(override.Interval), override.Limit, origin.String())
+			} else {
+				exemptLims[origin.String()] = limiterFactory(time.Duration(rateLimitConfig.ExemptBaseInterval), rateLimitConfig.ExemptBaseRate, origin.String())
+			}
+		}
+	}
+
 	overrideLims := make(map[string]FrontendRateLimiter)
 	globalMethodLims := make(map[string]bool)
 	for method, override := range rateLimitConfig.MethodOverrides {
@@ -186,6 +202,7 @@ func NewServer(
 			HandshakeTimeout: defaultWSHandshakeTimeout,
 		},
 		mainLim:                mainLim,
+		exemptLims:             exemptLims,
 		overrideLims:           overrideLims,
 		globallyLimitedMethods: globalMethodLims,
 		senderLim:              senderLim,
@@ -277,7 +294,39 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	isLimited := func(method string) bool {
 		isGloballyLimitedMethod := s.isGlobalLimit(method)
 		if !isGloballyLimitedMethod && (isUnlimitedOrigin || isUnlimitedUserAgent) {
-			return false
+			matchedKey := ""
+			if isUnlimitedOrigin {
+				for _, pat := range s.limExemptOrigins {
+					if pat.MatchString(origin) {
+						matchedKey = pat.String()
+						break
+					}
+				}
+			} else if isUnlimitedUserAgent {
+				for _, pat := range s.limExemptUserAgents {
+					if pat.MatchString(userAgent) {
+						matchedKey = pat.String()
+						break
+					}
+				}
+			}
+
+			if matchedKey == "" {
+				return false
+			}
+
+			exemptLim, ok := s.exemptLims[matchedKey]
+			if !ok || exemptLim == nil {
+				return false
+			}
+
+			// Aggregate exempt traffic as a whole group using a constant key
+			ok, err := exemptLim.Take(ctx, "exempt")
+			if err != nil {
+				log.Warn("error taking exempt rate limit", "err", err, "origin", origin)
+				return true
+			}
+			return !ok
 		}
 
 		var lim FrontendRateLimiter
@@ -651,6 +700,16 @@ func (s *Server) populateContext(w http.ResponseWriter, r *http.Request) context
 		ctx = context.WithValue(ctx, ContextKeyAuth, s.authenticatedPaths[authorization]) // nolint:staticcheck
 	}
 
+	origin := r.Header.Get("X-Forwarded-Host")
+	ctx = context.WithValue(ctx, ContextKeyOrigin, origin) // nolint:staticcheck
+
+	// Host and X-Forwarded-Host are domain name, such as: bsc-mainnet-builder-ap.nodereal.io
+	txSource := firstNonEmpty(
+		r.Host,
+		r.Header.Get("X-Forwarded-Host"),
+	)
+	ctx = context.WithValue(ctx, XTxSource, txSource)
+
 	return context.WithValue(
 		ctx,
 		ContextKeyReqID, // nolint:staticcheck
@@ -821,6 +880,14 @@ func GetAuthCtx(ctx context.Context) string {
 	return authUser
 }
 
+func GetOriginCtx(ctx context.Context) string {
+	origin, ok := ctx.Value(ContextKeyOrigin).(string)
+	if !ok {
+		return ""
+	}
+	return origin
+}
+
 func GetOpTxProxyAuthHeader(ctx context.Context) string {
 	auth, ok := ctx.Value(ContextKeyOpTxProxyAuth).(string)
 	if !ok {
@@ -843,6 +910,14 @@ func GetXForwardedFor(ctx context.Context) string {
 		return ""
 	}
 	return xff
+}
+
+func GetTxSource(ctx context.Context) string {
+	source, ok := ctx.Value(XTxSource).(string)
+	if !ok {
+		return ""
+	}
+	return source
 }
 
 type recordLenWriter struct {
@@ -934,4 +1009,13 @@ func (s *Server) checkEthCallOverride(ctx context.Context, req *RPCReq) json.Raw
 	}
 
 	return nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

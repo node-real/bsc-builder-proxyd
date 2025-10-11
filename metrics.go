@@ -45,6 +45,7 @@ var (
 		"backend_name",
 		"method_name",
 		"source",
+		"origin",
 	})
 
 	rpcBackendHTTPResponseCodesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -487,7 +488,11 @@ func RecordUnserviceableRequest(ctx context.Context, source string) {
 }
 
 func RecordRPCForward(ctx context.Context, backendName, method, source string) {
-	rpcForwardsTotal.WithLabelValues(GetAuthCtx(ctx), backendName, method, source).Inc()
+	origin := GetOriginCtx(ctx)
+	if origin == "" {
+		origin = "unknown"
+	}
+	rpcForwardsTotal.WithLabelValues(GetAuthCtx(ctx), backendName, method, source, origin).Inc()
 }
 
 func MaybeRecordSpecialRPCError(ctx context.Context, backendName, method string, rpcErr *RPCErr) {
