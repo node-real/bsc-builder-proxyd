@@ -47,6 +47,8 @@ const (
 	maxRequestBodyLogLen         = 2000
 	defaultMaxUpstreamBatchSize  = 10
 	defaultRateLimitHeader       = "X-Forwarded-For"
+
+	XTxSource = "X-Tx-Source"
 )
 
 var emptyArrayResponse = json.RawMessage("[]")
@@ -701,6 +703,13 @@ func (s *Server) populateContext(w http.ResponseWriter, r *http.Request) context
 	origin := r.Header.Get("X-Forwarded-Host")
 	ctx = context.WithValue(ctx, ContextKeyOrigin, origin) // nolint:staticcheck
 
+	// Host and X-Forwarded-Host are domain name, such as: bsc-mainnet-builder-ap.nodereal.io
+	txSource := firstNonEmpty(
+		r.Host,
+		r.Header.Get("X-Forwarded-Host"),
+	)
+	ctx = context.WithValue(ctx, XTxSource, txSource)
+
 	return context.WithValue(
 		ctx,
 		ContextKeyReqID, // nolint:staticcheck
@@ -903,6 +912,14 @@ func GetXForwardedFor(ctx context.Context) string {
 	return xff
 }
 
+func GetTxSource(ctx context.Context) string {
+	source, ok := ctx.Value(XTxSource).(string)
+	if !ok {
+		return ""
+	}
+	return source
+}
+
 type recordLenWriter struct {
 	io.Writer
 	Len int
@@ -992,4 +1009,13 @@ func (s *Server) checkEthCallOverride(ctx context.Context, req *RPCReq) json.Raw
 	}
 
 	return nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
