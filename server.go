@@ -333,7 +333,12 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 		if method == "" {
 			lim = s.mainLim
 		} else {
+			// Check if there's a method-specific override
 			lim = s.overrideLims[method]
+			// If no override exists, fallback to base rate limiter
+			if lim == nil {
+				lim = s.mainLim
+			}
 		}
 
 		if lim == nil {
@@ -510,23 +515,10 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 			continue
 		}
 
-		// Take base rate limit first
-		if isLimited("") {
+		// Check rate limit (method override if exists, otherwise base rate)
+		if isLimited(parsedReq.Method) {
 			log.Debug(
-				"rate limited individual RPC in a batch request",
-				"source", "rpc",
-				"req_id", parsedReq.ID,
-				"method", parsedReq.Method,
-			)
-			RecordRPCError(ctx, BackendProxyd, parsedReq.Method, ErrOverRateLimit)
-			responses[i] = NewRPCErrorRes(parsedReq.ID, ErrOverRateLimit)
-			continue
-		}
-
-		// Take rate limit for specific methods.
-		if _, ok := s.overrideLims[parsedReq.Method]; ok && isLimited(parsedReq.Method) {
-			log.Debug(
-				"rate limited specific RPC",
+				"rate limited RPC",
 				"source", "rpc",
 				"req_id", GetReqID(ctx),
 				"method", parsedReq.Method,

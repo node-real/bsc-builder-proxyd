@@ -49,7 +49,7 @@ max_latency_threshold = "10s"
 # Maximum latency accepted to serve requests before degraded, default 5s
 max_degraded_latency_threshold = "5s"
 # Maximum error rate accepted to serve requests, default 0.5 (i.e. 50%)
-max_error_rate_threshold = 0.3
+max_error_rate_threshold = 0.5
 
 [backends]
 # A map of backends by name.
@@ -126,6 +126,7 @@ eth_getBalance = "query"
 eth_getBlockByHash = "query"
 eth_getBlockByNumber = "query"
 eth_getCode = "query"
+eth_getHeaderByNumber = "query"
 eth_getTransactionCount = "query"
 eth_getTransactionReceipt = "query"
 eth_maxPriorityFeePerGas = "query"
