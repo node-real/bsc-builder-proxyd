@@ -136,6 +136,20 @@ eth_call = "query"
 eth_estimateGas = "query"
 eth_sendRawTransaction = "multicall"
 
+# Domain-specific RPC method mappings (optional)
+# Different domains can have different routing rules
+# If no domain-specific mapping is found, it will fallback to rpc_method_mappings above
+# [domain_rpc_method_mappings]
+# [domain_rpc_method_mappings."domain1.example.com"]
+# eth_blockNumber = "query"
+# eth_sendRawTransaction = "multicall"
+# eth_call = "query"
+#
+# [domain_rpc_method_mappings."domain2.example.com"]
+# eth_blockNumber = "query"
+# eth_sendRawTransaction = "query"
+# eth_call = "multicall"
+
 [eth_call_override]
 # 48Club
 [[eth_call_override.rules]]
