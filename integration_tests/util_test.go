@@ -12,10 +12,9 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
-
-	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/infra/proxyd"
 )
@@ -61,6 +60,62 @@ func (p *ProxydHTTPClient) SendRequest(body []byte) ([]byte, int, error) {
 		panic(err)
 	}
 	req.Header = p.headers
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, -1, err
+	}
+	defer res.Body.Close()
+	code := res.StatusCode
+	resBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		panic(err)
+	}
+	return resBody, code, nil
+}
+
+func (p *ProxydHTTPClient) SendRequestWithHeaders(rpcReq *proxyd.RPCReq, headers map[string]string) ([]byte, int, error) {
+	body, err := json.Marshal(rpcReq)
+	if err != nil {
+		panic(err)
+	}
+
+	req, err := http.NewRequest("POST", p.url, bytes.NewReader(body))
+	if err != nil {
+		panic(err)
+	}
+	req.Header = p.headers.Clone()
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, -1, err
+	}
+	defer res.Body.Close()
+	code := res.StatusCode
+	resBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		panic(err)
+	}
+	return resBody, code, nil
+}
+
+func (p *ProxydHTTPClient) SendBatchRequestWithHeaders(reqs []*proxyd.RPCReq, headers map[string]string) ([]byte, int, error) {
+	body, err := json.Marshal(reqs)
+	if err != nil {
+		panic(err)
+	}
+
+	req, err := http.NewRequest("POST", p.url, bytes.NewReader(body))
+	if err != nil {
+		panic(err)
+	}
+	req.Header = p.headers.Clone()
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
