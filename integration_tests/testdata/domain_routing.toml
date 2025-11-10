@@ -1,0 +1,44 @@
+[server]
+rpc_port = 8545
+
+[backend]
+response_timeout_seconds = 1
+
+[backends]
+[backends.backend1]
+rpc_url = "$GOOD_BACKEND_RPC_URL_1"
+
+[backends.backend2]
+rpc_url = "$GOOD_BACKEND_RPC_URL_2"
+
+[backend_groups]
+[backend_groups.group1]
+backends = ["backend1"]
+
+[backend_groups.group2]
+backends = ["backend2"]
+
+# Default RPC method mappings
+[rpc_method_mappings]
+eth_blockNumber = "group1"
+eth_chainId = "group1"
+eth_call = "group1"
+eth_gasPrice = "group1"
+
+# Domain-specific RPC method mappings
+[domain_rpc_method_mappings]
+
+# domain1.example.com routes to group2
+[domain_rpc_method_mappings."domain1.example.com"]
+eth_blockNumber = "group2"
+eth_chainId = "group2"
+eth_call = "group2"
+eth_gasPrice = "group2"
+
+# domain2.example.com has mixed routing
+[domain_rpc_method_mappings."domain2.example.com"]
+eth_blockNumber = "group2"
+eth_chainId = "group2"
+eth_call = "group1"
+eth_gasPrice = "group1"
+

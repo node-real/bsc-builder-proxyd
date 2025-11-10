@@ -347,6 +347,7 @@ func Start(config *Config) (*Server, func(), error) {
 		wsBackendGroup,
 		NewStringSetFromStrings(config.WSMethodWhitelist),
 		config.RPCMethodMappings,
+		config.DomainRPCMethodMappings,
 		config.Server.MaxBodySizeBytes,
 		resolvedAuth,
 		secondsToDuration(config.Server.TimeoutSeconds),

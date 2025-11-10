@@ -1,0 +1,47 @@
+[server]
+rpc_port = 8545
+
+[backend]
+response_timeout_seconds = 1
+
+[backends]
+[backends.backend_a]
+rpc_url = "$BACKEND_1_URL"
+
+[backends.backend_b]
+rpc_url = "$BACKEND_2_URL"
+
+[backends.backend_c]
+rpc_url = "$BACKEND_3_URL"
+
+[backend_groups]
+[backend_groups.group_a]
+backends = ["backend_a"]
+
+[backend_groups.group_b]
+backends = ["backend_b"]
+
+[backend_groups.group_c]
+backends = ["backend_c"]
+
+# Default RPC method mappings - use group_c
+[rpc_method_mappings]
+eth_call = "group_c"
+eth_blockNumber = "group_c"
+eth_chainId = "group_c"
+
+# Domain-specific RPC method mappings
+[domain_rpc_method_mappings]
+
+# domainA.example.com routes to group_a
+[domain_rpc_method_mappings."domainA.example.com"]
+eth_call = "group_a"
+eth_blockNumber = "group_a"
+eth_chainId = "group_a"
+
+# domainB.example.com routes to group_b
+[domain_rpc_method_mappings."domainB.example.com"]
+eth_call = "group_b"
+eth_blockNumber = "group_b"
+eth_chainId = "group_b"
+

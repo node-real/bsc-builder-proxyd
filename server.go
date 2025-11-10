@@ -54,33 +54,34 @@ const (
 var emptyArrayResponse = json.RawMessage("[]")
 
 type Server struct {
-	BackendGroups          map[string]*BackendGroup
-	wsBackendGroup         *BackendGroup
-	wsMethodWhitelist      *StringSet
-	rpcMethodMappings      map[string]string
-	maxBodySize            int64
-	enableRequestLog       bool
-	maxRequestBodyLogLen   int
-	authenticatedPaths     map[string]string
-	timeout                time.Duration
-	maxUpstreamBatchSize   int
-	maxBatchSize           int
-	enableServedByHeader   bool
-	upgrader               *websocket.Upgrader
-	mainLim                FrontendRateLimiter
-	exemptLims             map[string]FrontendRateLimiter
-	overrideLims           map[string]FrontendRateLimiter
-	senderLim              FrontendRateLimiter
-	allowedChainIds        []*big.Int
-	limExemptOrigins       []*regexp.Regexp
-	limExemptUserAgents    []*regexp.Regexp
-	globallyLimitedMethods map[string]bool
-	rpcServer              *http.Server
-	wsServer               *http.Server
-	cache                  RPCCache
-	srvMu                  sync.Mutex
-	rateLimitHeader        string
-	ethCallOverrideRules   []EthCallRule
+	BackendGroups           map[string]*BackendGroup
+	wsBackendGroup          *BackendGroup
+	wsMethodWhitelist       *StringSet
+	rpcMethodMappings       map[string]string
+	domainRPCMethodMappings map[string]map[string]string
+	maxBodySize             int64
+	enableRequestLog        bool
+	maxRequestBodyLogLen    int
+	authenticatedPaths      map[string]string
+	timeout                 time.Duration
+	maxUpstreamBatchSize    int
+	maxBatchSize            int
+	enableServedByHeader    bool
+	upgrader                *websocket.Upgrader
+	mainLim                 FrontendRateLimiter
+	exemptLims              map[string]FrontendRateLimiter
+	overrideLims            map[string]FrontendRateLimiter
+	senderLim               FrontendRateLimiter
+	allowedChainIds         []*big.Int
+	limExemptOrigins        []*regexp.Regexp
+	limExemptUserAgents     []*regexp.Regexp
+	globallyLimitedMethods  map[string]bool
+	rpcServer               *http.Server
+	wsServer                *http.Server
+	cache                   RPCCache
+	srvMu                   sync.Mutex
+	rateLimitHeader         string
+	ethCallOverrideRules    []EthCallRule
 }
 
 type limiterFunc func(method string) bool
@@ -92,6 +93,7 @@ func NewServer(
 	wsBackendGroup *BackendGroup,
 	wsMethodWhitelist *StringSet,
 	rpcMethodMappings map[string]string,
+	domainRPCMethodMappings map[string]map[string]string,
 	maxBodySize int64,
 	authenticatedPaths map[string]string,
 	timeout time.Duration,
@@ -185,19 +187,20 @@ func NewServer(
 	}
 
 	return &Server{
-		BackendGroups:        backendGroups,
-		wsBackendGroup:       wsBackendGroup,
-		wsMethodWhitelist:    wsMethodWhitelist,
-		rpcMethodMappings:    rpcMethodMappings,
-		maxBodySize:          maxBodySize,
-		authenticatedPaths:   authenticatedPaths,
-		timeout:              timeout,
-		maxUpstreamBatchSize: maxUpstreamBatchSize,
-		enableServedByHeader: enableServedByHeader,
-		cache:                cache,
-		enableRequestLog:     enableRequestLog,
-		maxRequestBodyLogLen: maxRequestBodyLogLen,
-		maxBatchSize:         maxBatchSize,
+		BackendGroups:           backendGroups,
+		wsBackendGroup:          wsBackendGroup,
+		wsMethodWhitelist:       wsMethodWhitelist,
+		rpcMethodMappings:       rpcMethodMappings,
+		domainRPCMethodMappings: domainRPCMethodMappings,
+		maxBodySize:             maxBodySize,
+		authenticatedPaths:      authenticatedPaths,
+		timeout:                 timeout,
+		maxUpstreamBatchSize:    maxUpstreamBatchSize,
+		enableServedByHeader:    enableServedByHeader,
+		cache:                   cache,
+		enableRequestLog:        enableRequestLog,
+		maxRequestBodyLogLen:    maxRequestBodyLogLen,
+		maxBatchSize:            maxBatchSize,
 		upgrader: &websocket.Upgrader{
 			HandshakeTimeout: defaultWSHandshakeTimeout,
 		},
@@ -406,7 +409,7 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		batchRes, batchContainsCached, servedBy, err := s.handleBatchRPC(ctx, reqs, isLimited, true)
+		batchRes, batchContainsCached, servedBy, err := s.handleBatchRPC(ctx, reqs, isLimited, true, origin)
 		if err == context.DeadlineExceeded {
 			writeRPCError(ctx, w, nil, ErrGatewayTimeout)
 			return
@@ -429,7 +432,7 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rawBody := json.RawMessage(body)
-	backendRes, cached, servedBy, err := s.handleBatchRPC(ctx, []json.RawMessage{rawBody}, isLimited, false)
+	backendRes, cached, servedBy, err := s.handleBatchRPC(ctx, []json.RawMessage{rawBody}, isLimited, false, origin)
 	if err != nil {
 		if errors.Is(err, ErrConsensusGetReceiptsCantBeBatched) ||
 			errors.Is(err, ErrConsensusGetReceiptsInvalidTarget) {
@@ -446,7 +449,7 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	writeRPCRes(ctx, w, backendRes[0])
 }
 
-func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isLimited limiterFunc, isBatch bool) ([]*RPCRes, bool, string, error) {
+func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isLimited limiterFunc, isBatch bool, origin string) ([]*RPCRes, bool, string, error) {
 	// A request set is transformed into groups of batches.
 	// Each batch group maps to a forwarded JSON-RPC batch request (subject to maxUpstreamBatchSize constraints)
 	// A groupID is used to decouple Requests that have duplicate ID so they're not part of the same batch that's
@@ -457,6 +460,9 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 		groupID      int
 		backendGroup string
 	}
+
+	// Get the origin from context to select the appropriate rpc_method_mappings
+	rpcMethodMappings := s.getRPCMethodMappings(origin)
 
 	responses := make([]*RPCRes, len(reqs))
 	batches := make(map[batchGroup][]batchElem)
@@ -500,7 +506,7 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 			}
 		}
 
-		group := s.rpcMethodMappings[parsedReq.Method]
+		group := rpcMethodMappings[parsedReq.Method]
 		if group == "" {
 			// use unknown below to prevent DOS vector that fills up memory
 			// with arbitrary method names.
@@ -738,6 +744,17 @@ func (s *Server) isUnlimitedUserAgent(origin string) bool {
 
 func (s *Server) isGlobalLimit(method string) bool {
 	return s.globallyLimitedMethods[method]
+}
+
+func (s *Server) getRPCMethodMappings(origin string) map[string]string {
+	// Check if there's a domain-specific mapping for this origin
+	if origin != "" {
+		if mapping, ok := s.domainRPCMethodMappings[origin]; ok {
+			return mapping
+		}
+	}
+	// Fallback to default mappings
+	return s.rpcMethodMappings
 }
 
 func (s *Server) rateLimitSender(ctx context.Context, req *RPCReq) error {
