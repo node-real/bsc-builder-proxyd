@@ -2,6 +2,7 @@ package proxyd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -341,9 +342,9 @@ func (cp *ConsensusPoller) UpdateBackend(ctx context.Context, be *Backend) {
 		RecordConsensusBackendPeerCount(be, peerCount)
 	}
 
-	latestBlockNumber, latestBlockHash, err := cp.fetchBlock(ctx, be, "latest")
+	latestBlockNumber, latestBlockHash, safeBlockNumber, finalizedBlockNumber, err := cp.fetchBlocksBatch(ctx, be)
 	if err != nil {
-		log.Warn("error updating backend - latest block will not be updated", "name", be.Name, "err", err)
+		log.Warn("error updating backend - blocks will not be updated", "name", be.Name, "err", err)
 		return
 	}
 	if latestBlockNumber == 0 {
@@ -351,25 +352,11 @@ func (cp *ConsensusPoller) UpdateBackend(ctx context.Context, be *Backend) {
 		be.intermittentErrorsSlidingWindow.Incr()
 		return
 	}
-
-	safeBlockNumber, _, err := cp.fetchBlock(ctx, be, "safe")
-	if err != nil {
-		log.Warn("error updating backend - safe block will not be updated", "name", be.Name, "err", err)
-		return
-	}
-
 	if safeBlockNumber == 0 {
 		log.Warn("error backend responded a 200 with blockheight 0 for safe block", "name", be.Name)
 		be.intermittentErrorsSlidingWindow.Incr()
 		return
 	}
-
-	finalizedBlockNumber, _, err := cp.fetchBlock(ctx, be, "finalized")
-	if err != nil {
-		log.Warn("error updating backend - finalized block will not be updated", "name", be.Name, "err", err)
-		return
-	}
-
 	if finalizedBlockNumber == 0 {
 		log.Warn("error backend responded a 200 with blockheight 0 for finalized block", "name", be.Name)
 		be.intermittentErrorsSlidingWindow.Incr()
@@ -605,6 +592,86 @@ func (cp *ConsensusPoller) Reset() {
 	for _, be := range cp.backendGroup.Backends {
 		cp.backendState[be] = &backendState{}
 	}
+}
+
+// fetchBlocksBatch fetches latest, safe and finalized blocks in a single batch RPC call
+// to ensure all three heights reflect the same point-in-time snapshot on the backend.
+func (cp *ConsensusPoller) fetchBlocksBatch(ctx context.Context, be *Backend) (
+	latestBlockNumber hexutil.Uint64, latestBlockHash string,
+	safeBlockNumber hexutil.Uint64, finalizedBlockNumber hexutil.Uint64, err error,
+) {
+	buildReq := func(id string, tag string) *RPCReq {
+		params, _ := json.Marshal([]interface{}{tag, false})
+		return &RPCReq{
+			JSONRPC: JSONRPCVersion,
+			Method:  "eth_getBlockByNumber",
+			Params:  params,
+			ID:      []byte(id),
+		}
+	}
+
+	reqs := []*RPCReq{
+		buildReq("latest", "latest"),
+		buildReq("safe", "safe"),
+		buildReq("finalized", "finalized"),
+	}
+
+	results, err := be.doForward(ctx, reqs, true, be.consensusSemaphore)
+	if err != nil {
+		return 0, "", 0, 0, err
+	}
+	if len(results) != 3 {
+		return 0, "", 0, 0, fmt.Errorf("unexpected batch response length %d (expected 3) from backend %s", len(results), be.Name)
+	}
+
+	parseResult := func(res *RPCRes, tag string) (hexutil.Uint64, string, error) {
+		if res.IsError() {
+			return 0, "", fmt.Errorf("eth_getBlockByNumber(%s) error from backend %s: %s", tag, be.Name, res.Error.Error())
+		}
+		jsonMap, ok := res.Result.(map[string]interface{})
+		if !ok {
+			return 0, "", fmt.Errorf("unexpected response to eth_getBlockByNumber(%s) on backend %s", tag, be.Name)
+		}
+		num := hexutil.Uint64(hexutil.MustDecodeUint64(jsonMap["number"].(string)))
+		hash, _ := jsonMap["hash"].(string)
+		return num, hash, nil
+	}
+
+	// sortBatchRPCResponse orders by request ID, but our IDs are strings "latest"/"safe"/"finalized"
+	// so we match by ID manually.
+	byID := make(map[string]*RPCRes, 3)
+	for _, r := range results {
+		byID[string(r.ID)] = r
+	}
+
+	latestRes, ok := byID["latest"]
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("missing latest block response from backend %s", be.Name)
+	}
+	latestBlockNumber, latestBlockHash, err = parseResult(latestRes, "latest")
+	if err != nil {
+		return 0, "", 0, 0, err
+	}
+
+	safeRes, ok := byID["safe"]
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("missing safe block response from backend %s", be.Name)
+	}
+	safeBlockNumber, _, err = parseResult(safeRes, "safe")
+	if err != nil {
+		return 0, "", 0, 0, err
+	}
+
+	finalizedRes, ok := byID["finalized"]
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("missing finalized block response from backend %s", be.Name)
+	}
+	finalizedBlockNumber, _, err = parseResult(finalizedRes, "finalized")
+	if err != nil {
+		return 0, "", 0, 0, err
+	}
+
+	return latestBlockNumber, latestBlockHash, safeBlockNumber, finalizedBlockNumber, nil
 }
 
 // fetchBlock is a convenient wrapper to make a request to get a block directly from the backend
