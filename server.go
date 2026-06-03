@@ -76,6 +76,7 @@ type Server struct {
 	limExemptOrigins        []*regexp.Regexp
 	limExemptUserAgents     []*regexp.Regexp
 	globallyLimitedMethods  map[string]bool
+	exemptGroups            []*compiledExemptGroup
 	rpcServer               *http.Server
 	wsServer                *http.Server
 	cache                   RPCCache
@@ -87,6 +88,41 @@ type Server struct {
 type limiterFunc func(method string) bool
 
 type limiterFactoryFunc func(dur time.Duration, max int, prefix string) FrontendRateLimiter
+
+// compiledExemptGroup is the runtime representation of an ExemptRateLimitGroup
+// with all regular expressions pre-compiled and a ready-to-use limiter.
+type compiledExemptGroup struct {
+	name       string
+	origins    []*regexp.Regexp
+	userAgents []*regexp.Regexp
+	lim        FrontendRateLimiter
+	byIP       bool
+}
+
+// matches reports whether the given origin or userAgent is covered by this group.
+func (g *compiledExemptGroup) matches(origin, userAgent string) bool {
+	for _, pat := range g.origins {
+		if pat.MatchString(origin) {
+			return true
+		}
+	}
+	for _, pat := range g.userAgents {
+		if pat.MatchString(userAgent) {
+			return true
+		}
+	}
+	return false
+}
+
+// rateLimitKey returns the Take key for this group.
+// When byIP is true each source IP gets its own bucket; otherwise all
+// traffic in the group shares a single "group" bucket.
+func (g *compiledExemptGroup) rateLimitKey(xff string) string {
+	if g.byIP {
+		return xff
+	}
+	return "group"
+}
 
 func NewServer(
 	backendGroups map[string]*BackendGroup,
@@ -176,6 +212,34 @@ func NewServer(
 			globalMethodLims[method] = true
 		}
 	}
+	// Build compiled exempt groups (new group-based mechanism).
+	var exemptGroups []*compiledExemptGroup
+	for name, grpCfg := range rateLimitConfig.ExemptGroups {
+		if grpCfg.Limit <= 0 || time.Duration(grpCfg.Interval) == 0 {
+			return nil, fmt.Errorf("exempt_group %q: limit and interval must be > 0", name)
+		}
+		cg := &compiledExemptGroup{
+			name: name,
+			lim:  limiterFactory(time.Duration(grpCfg.Interval), grpCfg.Limit, "exempt_group:"+name),
+			byIP: grpCfg.ByIP,
+		}
+		for _, pat := range grpCfg.Origins {
+			re, err := regexp.Compile(pat)
+			if err != nil {
+				return nil, fmt.Errorf("exempt_group %q: invalid origin pattern %q: %w", name, pat, err)
+			}
+			cg.origins = append(cg.origins, re)
+		}
+		for _, pat := range grpCfg.UserAgents {
+			re, err := regexp.Compile(pat)
+			if err != nil {
+				return nil, fmt.Errorf("exempt_group %q: invalid user_agent pattern %q: %w", name, pat, err)
+			}
+			cg.userAgents = append(cg.userAgents, re)
+		}
+		exemptGroups = append(exemptGroups, cg)
+	}
+
 	var senderLim FrontendRateLimiter
 	if senderRateLimitConfig.Enabled {
 		senderLim = limiterFactory(time.Duration(senderRateLimitConfig.Interval), senderRateLimitConfig.Limit, "senders")
@@ -214,6 +278,7 @@ func NewServer(
 		limExemptUserAgents:    limExemptUserAgents,
 		rateLimitHeader:        rateLimitHeader,
 		ethCallOverrideRules:   ethCallOverrideRules,
+		exemptGroups:           exemptGroups,
 	}, nil
 }
 
@@ -296,6 +361,23 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 
 	isLimited := func(method string) bool {
 		isGloballyLimitedMethod := s.isGlobalLimit(method)
+
+		// --- New group-based exempt check (takes precedence) ---
+		if !isGloballyLimitedMethod {
+			for _, grp := range s.exemptGroups {
+				if grp.matches(origin, userAgent) {
+					ok, err := grp.lim.Take(ctx, grp.rateLimitKey(xff))
+					if err != nil {
+						log.Warn("error taking exempt group rate limit",
+							"err", err, "group", grp.name, "origin", origin)
+						return true
+					}
+					return !ok
+				}
+			}
+		}
+
+		// --- Legacy exempt origins / user-agents check ---
 		if !isGloballyLimitedMethod && (isUnlimitedOrigin || isUnlimitedUserAgent) {
 			matchedKey := ""
 			if isUnlimitedOrigin {

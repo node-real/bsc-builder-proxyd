@@ -68,6 +68,12 @@ type RateLimitConfig struct {
 	ErrorMessage       string                              `toml:"error_message"`
 	MethodOverrides    map[string]*RateLimitMethodOverride `toml:"method_overrides"`
 	IPHeaderOverride   string                              `toml:"ip_header_override"`
+	// ExemptGroups defines named groups of origins/user-agents that share a
+	// common rate limit budget. Origins within a group are matched as regular
+	// expressions. A request is matched against groups in declaration order;
+	// the first matching group wins. Groups take precedence over the legacy
+	// ExemptOrigins / ExemptOverrides mechanism.
+	ExemptGroups map[string]*ExemptRateLimitGroup `toml:"exempt_groups"`
 }
 
 type RateLimitMethodOverride struct {
@@ -79,6 +85,30 @@ type RateLimitMethodOverride struct {
 type RateLimitExemptOrigin struct {
 	Limit    int          `toml:"limit"`
 	Interval TOMLDuration `toml:"interval"`
+}
+
+// ExemptRateLimitGroup defines a named group of origins / user-agents that
+// share a single rate-limit bucket.
+//
+// Example TOML:
+//
+//	[rate_limit.exempt_groups.internal]
+//	origins      = [".*\\.internal\\.example\\.com", "10\\.0\\.0\\..*"]
+//	user_agents  = ["my-internal-service/.*"]
+//	limit        = 5000
+//	interval     = "1s"
+//	# by_ip = true  →  each source IP in the group gets its own bucket
+//	# by_ip = false →  all traffic in the group shares one bucket (default)
+//	by_ip        = false
+type ExemptRateLimitGroup struct {
+	Origins    []string     `toml:"origins"`
+	UserAgents []string     `toml:"user_agents"`
+	Limit      int          `toml:"limit"`
+	Interval   TOMLDuration `toml:"interval"`
+	// ByIP controls the counting granularity.
+	// false (default): all matched requests share one counter ("group" key).
+	// true:            each source IP has its own counter within the group.
+	ByIP bool `toml:"by_ip"`
 }
 
 type TOMLDuration time.Duration

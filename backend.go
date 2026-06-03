@@ -492,6 +492,14 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	// we are concerned about network error rates, so we record 1 request independently of how many are in the batch
 	b.networkRequestsSlidingWindow.Incr()
 
+	var netErr error
+
+	defer func() {
+		if netErr != nil {
+			log.Info("doForward net error", "err", netErr.Error())
+		}
+	}()
+
 	translatedReqs := make(map[string]*RPCReq, len(rpcReqs))
 	// translate consensus_getReceipts to receipts target
 	// right now we only support non-batched
@@ -558,6 +566,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", b.rpcURL, bytes.NewReader(body))
 	if err != nil {
+		netErr = err
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
 		return nil, wrapErr(err, "error creating backend request")
@@ -594,6 +603,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	start := time.Now()
 	httpRes, err := b.client.DoWithSemaphore(httpReq, sem)
 	if err != nil {
+		netErr = err
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
 		return nil, wrapErr(err, "error in backend request")
@@ -613,6 +623,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 
 	// Alchemy returns a 400 on bad JSONs, so handle that case
 	if httpRes.StatusCode != 200 && httpRes.StatusCode != 400 {
+		netErr = errors.New("not 200")
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
 		return nil, fmt.Errorf("response code %d", httpRes.StatusCode)
@@ -624,6 +635,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 		return nil, ErrBackendResponseTooLarge
 	}
 	if err != nil {
+		netErr = err
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
 		return nil, wrapErr(err, "error reading response body")
@@ -641,6 +653,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	} else {
 		if err := json.Unmarshal(resB, &rpcRes); err != nil {
 			// Infura may return a single JSON-RPC response if, for example, the batch contains a request for an unsupported method
+			netErr = err
 			if responseIsNotBatched(resB) {
 				b.intermittentErrorsSlidingWindow.Incr()
 				RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
@@ -653,6 +666,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	}
 
 	if len(rpcReqs) != len(rpcRes) {
+		netErr = err
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
 		return nil, ErrBackendUnexpectedJSONRPC
