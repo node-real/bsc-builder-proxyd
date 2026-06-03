@@ -218,10 +218,13 @@ func TestWSClientExceedReadLimit(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	closed := false
+	closedCh := make(chan struct{}, 1)
 	originalHandler := client.conn.CloseHandler()
 	client.conn.SetCloseHandler(func(code int, text string) error {
-		closed = true
+		select {
+		case closedCh <- struct{}{}:
+		default:
+		}
 		return originalHandler(code, text)
 	})
 
@@ -236,6 +239,12 @@ func TestWSClientExceedReadLimit(t *testing.T) {
 		[]byte(clientReq),
 	)
 	require.Error(t, err)
-	require.True(t, closed)
+
+	// Wait for the server's close frame to be processed by the readPump goroutine.
+	select {
+	case <-closedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for connection close")
+	}
 
 }
