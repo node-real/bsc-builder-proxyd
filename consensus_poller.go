@@ -606,7 +606,7 @@ func (cp *ConsensusPoller) fetchBlocksBatch(ctx context.Context, be *Backend) (
 			JSONRPC: JSONRPCVersion,
 			Method:  "eth_getBlockByNumber",
 			Params:  params,
-			ID:      []byte(id),
+			ID:      []byte(`"` + id + `"`),
 		}
 	}
 
@@ -644,7 +644,7 @@ func (cp *ConsensusPoller) fetchBlocksBatch(ctx context.Context, be *Backend) (
 		byID[string(r.ID)] = r
 	}
 
-	latestRes, ok := byID["latest"]
+	latestRes, ok := byID[`"latest"`]
 	if !ok {
 		return 0, "", 0, 0, fmt.Errorf("missing latest block response from backend %s", be.Name)
 	}
@@ -653,7 +653,7 @@ func (cp *ConsensusPoller) fetchBlocksBatch(ctx context.Context, be *Backend) (
 		return 0, "", 0, 0, err
 	}
 
-	safeRes, ok := byID["safe"]
+	safeRes, ok := byID[`"safe"`]
 	if !ok {
 		return 0, "", 0, 0, fmt.Errorf("missing safe block response from backend %s", be.Name)
 	}
@@ -662,7 +662,7 @@ func (cp *ConsensusPoller) fetchBlocksBatch(ctx context.Context, be *Backend) (
 		return 0, "", 0, 0, err
 	}
 
-	finalizedRes, ok := byID["finalized"]
+	finalizedRes, ok := byID[`"finalized"`]
 	if !ok {
 		return 0, "", 0, 0, fmt.Errorf("missing finalized block response from backend %s", be.Name)
 	}

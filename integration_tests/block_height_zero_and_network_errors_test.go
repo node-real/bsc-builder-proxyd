@@ -336,12 +336,14 @@ func TestBlockHeightZero(t *testing.T) {
 		overrideBlock("node1", "finalized", "0x0", 403)
 		overridePeerCount("node1", 0, 500)
 
-		for i := 1; i < 7; i++ {
+		for i := 1; i < 5; i++ {
 			require.False(t, bg.Consensus.IsBanned(nodes["node1"].backend), "Execpted node 1 to be not banned on iteration ", i)
 			require.False(t, bg.Consensus.IsBanned(nodes["node2"].backend), "Execpted node 2 to be not banned on iteration ", i)
 			update()
-			// On the 5th update (i=6), node 1 will be banned due to error rate and not increment window
-			if i < 6 {
+			// On the 4th iteration (i=4), node 1 will be banned due to error rate and not increment window.
+			// With batch fetch, each consensus poll counts as 1 network request instead of 3 separate
+			// requests, so the error rate threshold is reached sooner than with individual calls.
+			if i < 4 {
 				require.Equal(t, nodes["node1"].intermittentNetErrorWindow.Count(), uint(i))
 			}
 			require.Equal(t, nodes["node2"].intermittentNetErrorWindow.Count(), uint(0))
