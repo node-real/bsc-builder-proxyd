@@ -1,6 +1,6 @@
 module github.com/ethereum-optimism/infra/proxyd
 
-go 1.22
+go 1.24.2
 
 toolchain go1.24.2
 

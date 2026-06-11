@@ -1,4 +1,4 @@
-FROM golang:1.21.3-alpine3.18 AS builder
+FROM public.ecr.aws/docker/library/golang:1.25.3-alpine3.22 AS builder
 
 RUN apk add make jq git gcc musl-dev linux-headers
 
