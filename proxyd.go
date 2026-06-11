@@ -15,6 +15,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/ethereum-optimism/infra/proxyd/forward"
 )
 
 func SetLogLevel(logLevel slog.Leveler) {
@@ -496,8 +498,35 @@ func Start(config *Config) (*Server, func(), error) {
 	<-errTimer.C
 	log.Info("started proxyd")
 
+	// Initialize QUIC forward service if configured (send-only, no inbound server).
+	var fwdSvc *forward.Service
+	if config.Forward.Enabled {
+		fwdConfig := &forward.Config{
+			Enabled:              config.Forward.Enabled,
+			Name:                 config.Forward.Name,
+			Port:                 config.Forward.Port,
+			Remotes:              config.Forward.Remotes,
+			Workers:              config.Forward.Workers,
+			QueueSize:            config.Forward.QueueSize,
+			TailBundleWhitelists:   config.Forward.TailBundleWhitelists,
+			TailBundleIPWhitelists: config.Forward.TailBundleIPWhitelists,
+		}
+		fwdSvc = forward.NewService(fwdConfig)
+		if fwdSvc != nil {
+			if err := fwdSvc.Start(); err != nil {
+				log.Error("failed to start QUIC forward service", "err", err)
+			} else {
+				srv.forwardSvc = fwdSvc
+				log.Info("QUIC forward service started", "remotes", config.Forward.Remotes)
+			}
+		}
+	}
+
 	shutdownFunc := func() {
 		log.Info("shutting down proxyd")
+		if fwdSvc != nil {
+			fwdSvc.Stop()
+		}
 		srv.Shutdown()
 		log.Info("goodbye")
 	}
