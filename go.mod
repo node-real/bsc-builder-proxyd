@@ -2,8 +2,6 @@ module github.com/ethereum-optimism/infra/proxyd
 
 go 1.24.2
 
-toolchain go1.24.2
-
 require (
 	github.com/BurntSushi/toml v1.3.2
 	github.com/alicebob/miniredis v2.5.0+incompatible
