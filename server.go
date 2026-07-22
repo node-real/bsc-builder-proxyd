@@ -812,7 +812,14 @@ func (s *Server) rateLimitSender(ctx context.Context, req *RPCReq) error {
 		return txpool.ErrInvalidSender
 	}
 
-	signer := types.LatestSignerForChainID(tx.ChainId())
+	// Pre-EIP-155 txs report ChainId()=0; LatestSignerForChainID panics on non-positive chainID since geth ≥1.16.
+	chainID := tx.ChainId()
+	var signer types.Signer
+	if chainID == nil || chainID.Sign() <= 0 {
+		signer = types.HomesteadSigner{}
+	} else {
+		signer = types.LatestSignerForChainID(chainID)
+	}
 	from, err := types.Sender(signer, tx)
 	if err != nil {
 		log.Debug("could not get sender from transaction", "err", err, "req_id", GetReqID(ctx))

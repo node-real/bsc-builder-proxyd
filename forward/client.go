@@ -28,7 +28,7 @@ const (
 type sendTask struct {
 	taskType  taskType
 	remote    string
-	conn      quic.Connection
+	conn      *quic.Conn
 	packet    []byte
 	orderHash *common.Hash
 	timestamp int64
@@ -143,7 +143,7 @@ func (p *workerPool) sendBundle(task *sendTask) {
 	RecordSendBundle("success")
 }
 
-func (p *workerPool) attemptSend(remote string, conn quic.Connection, packet []byte) error {
+func (p *workerPool) attemptSend(remote string, conn *quic.Conn, packet []byte) error {
 	if conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
@@ -299,7 +299,7 @@ func (c *Client) connectToRemote(remote string) {
 
 	connInterface, hasConnection := c.connections.Load(remote)
 	if hasConnection {
-		conn := connInterface.(quic.Connection)
+		conn := connInterface.(*quic.Conn)
 		if !c.isConnectionHealthy(conn) {
 			log.Warn("Connection is unhealthy, attempting to reconnect", "remote", remote)
 			_ = conn.CloseWithError(0, "connection unhealthy")
@@ -313,7 +313,7 @@ func (c *Client) connectToRemote(remote string) {
 	c.establishConnection(remote)
 }
 
-func (c *Client) isConnectionHealthy(conn quic.Connection) bool {
+func (c *Client) isConnectionHealthy(conn *quic.Conn) bool {
 	return conn != nil && conn.Context().Err() == nil
 }
 
@@ -361,7 +361,7 @@ func (c *Client) establishConnection(remote string) {
 		log.Info("Forward client connected", "remote", remote, "attempt", attempt+1)
 		oldConnInterface, hasOld := c.connections.Swap(remote, conn)
 		if hasOld {
-			oldConn := oldConnInterface.(quic.Connection)
+			oldConn := oldConnInterface.(*quic.Conn)
 			go func() {
 				time.Sleep(5 * time.Second)
 				_ = oldConn.CloseWithError(0, "replaced")
@@ -384,7 +384,7 @@ func (c *Client) Shutdown() {
 		c.pool.shutdown()
 	}
 	c.connections.Range(func(key, value interface{}) bool {
-		conn := value.(quic.Connection)
+		conn := value.(*quic.Conn)
 		if conn != nil {
 			_ = conn.CloseWithError(0, "")
 		}
@@ -418,7 +418,7 @@ func (c *Client) ForwardRawTransaction(rawTx hexutil.Bytes, txHash common.Hash, 
 	}
 
 	c.connections.Range(func(key, value interface{}) bool {
-		conn := value.(quic.Connection)
+		conn := value.(*quic.Conn)
 		if conn == nil {
 			return true
 		}
@@ -456,7 +456,7 @@ func (c *Client) ForwardBundle(req *BundleRequest) error {
 	}
 
 	c.connections.Range(func(key, value interface{}) bool {
-		conn := value.(quic.Connection)
+		conn := value.(*quic.Conn)
 		if conn == nil {
 			return true
 		}
