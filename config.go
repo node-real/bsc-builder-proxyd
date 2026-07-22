@@ -222,6 +222,22 @@ type EthCallOverrideConfig struct {
 	Rules []EthCallRule `toml:"rules"`
 }
 
+// ForwardConfig holds configuration for QUIC-based transaction/bundle forwarding.
+type ForwardConfig struct {
+	Enabled   bool     `toml:"enabled"`
+	Name      string   `toml:"name"`
+	Port      int      `toml:"port"`
+	Remotes   []string `toml:"remotes"`
+	Workers   int      `toml:"workers"`
+	QueueSize int      `toml:"queue_size"`
+	// TailBundleWhitelists is the list of X-Tx-Source / HTTP Host values whose
+	// bundles should be forwarded as TailBundles (Source = "tail-bundle").
+	TailBundleWhitelists []string `toml:"tail_bundle_whitelists"`
+	// TailBundleIPWhitelists is the list of client IP addresses (first X-Forwarded-For hop)
+	// whose bundles should be forwarded as TailBundles. Either whitelist matching is sufficient.
+	TailBundleIPWhitelists []string `toml:"tail_bundle_ip_whitelists"`
+}
+
 type Config struct {
 	WSBackendGroup          string                       `toml:"ws_backend_group"`
 	Server                  ServerConfig                 `toml:"server"`
@@ -240,6 +256,7 @@ type Config struct {
 	WhitelistErrorMessage   string                       `toml:"whitelist_error_message"`
 	SenderRateLimit         SenderRateLimitConfig        `toml:"sender_rate_limit"`
 	EthCallOverride         EthCallOverrideConfig        `toml:"eth_call_override"`
+	Forward                 ForwardConfig                `toml:"forward"`
 }
 
 func ReadFromEnvOrConfig(value string) (string, error) {

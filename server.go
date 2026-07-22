@@ -26,6 +26,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/cors"
 	"github.com/syndtr/goleveldb/leveldb/opt"
+
+	"github.com/ethereum-optimism/infra/proxyd/forward"
 )
 
 const (
@@ -34,6 +36,7 @@ const (
 	ContextKeyXForwardedFor      = "x_forwarded_for"
 	ContextKeyOpTxProxyAuth      = "op_txproxy_auth"
 	ContextKeyOrigin             = "x_forwarded_host"
+	ContextKeyXTxSource          = "x_tx_source"
 	DefaultOpTxProxyAuthHeader   = "X-Optimism-Signature"
 	DefaultMaxBatchRPCCallsLimit = 100
 	MaxBatchRPCCallsHardLimit    = 1000
@@ -82,6 +85,7 @@ type Server struct {
 	srvMu                   sync.Mutex
 	rateLimitHeader         string
 	ethCallOverrideRules    []EthCallRule
+	forwardSvc              *forward.Service // nil when QUIC forward is disabled
 }
 
 type limiterFunc func(method string) bool
@@ -283,6 +287,7 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 
 	// origin := r.Header.Get("Origin")
 	origin := r.Header.Get("X-Forwarded-Host")
+	ctx = context.WithValue(ctx, ContextKeyXTxSource, r.Header.Get(XTxSource))
 	userAgent := r.Header.Get("User-Agent")
 	// Use XFF in context since it will automatically be replaced by the remote IP
 	xff := stripXFF(GetXForwardedFor(ctx))
@@ -551,6 +556,22 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 		batchGroupID := ids[id]
 		batchGroup := batchGroup{groupID: batchGroupID, backendGroup: group}
 		batches[batchGroup] = append(batches[batchGroup], batchElem{parsedReq, i})
+
+		// Fire-and-forget QUIC forward for transaction/bundle send methods.
+		if s.forwardSvc != nil {
+			switch parsedReq.Method {
+			case "eth_sendRawTransaction":
+				txSource, _ := ctx.Value(ContextKeyXTxSource).(string)
+				s.forwardSvc.TryForwardRawTx(parsedReq.Params, txSource)
+			case "eth_sendBundle":
+				submittedDomain, _ := ctx.Value(ContextKeyXTxSource).(string)
+				if submittedDomain == "" {
+					submittedDomain = origin
+				}
+				clientIP := firstXFFHop(GetXForwardedFor(ctx))
+				s.forwardSvc.TryForwardBundle(parsedReq.Params, submittedDomain, clientIP)
+			}
+		}
 	}
 
 	servedBy := make(map[string]bool, 0)
@@ -791,7 +812,14 @@ func (s *Server) rateLimitSender(ctx context.Context, req *RPCReq) error {
 		return txpool.ErrInvalidSender
 	}
 
-	signer := types.LatestSignerForChainID(tx.ChainId())
+	// Pre-EIP-155 txs report ChainId()=0; LatestSignerForChainID panics on non-positive chainID since geth ≥1.16.
+	chainID := tx.ChainId()
+	var signer types.Signer
+	if chainID == nil || chainID.Sign() <= 0 {
+		signer = types.HomesteadSigner{}
+	} else {
+		signer = types.LatestSignerForChainID(chainID)
+	}
 	from, err := types.Sender(signer, tx)
 	if err != nil {
 		log.Debug("could not get sender from transaction", "err", err, "req_id", GetReqID(ctx))
@@ -919,6 +947,18 @@ func GetXForwardedFor(ctx context.Context) string {
 		return ""
 	}
 	return xff
+}
+
+// firstXFFHop returns the first (leftmost) IP from an X-Forwarded-For value,
+// which is the original client IP. Returns empty string if xff is empty.
+func firstXFFHop(xff string) string {
+	if xff == "" {
+		return ""
+	}
+	if i := strings.IndexByte(xff, ','); i >= 0 {
+		return strings.TrimSpace(xff[:i])
+	}
+	return strings.TrimSpace(xff)
 }
 
 func GetTxSource(ctx context.Context) string {
