@@ -170,7 +170,8 @@ type BackendGroupConfig struct {
 
 	RoutingStrategy RoutingStrategy `toml:"routing_strategy"`
 
-	MulticallRPCErrorCheck bool `toml:"multicall_rpc_error_check"`
+	MulticallRPCErrorCheck bool                   `toml:"multicall_rpc_error_check"`
+	StagedForwarding       StagedForwardingConfig `toml:"staged_forwarding"`
 
 	/*
 		Deprecated: Use routing_strategy config to create a consensus_aware proxyd instance
@@ -194,6 +195,49 @@ type BackendGroupConfig struct {
 }
 
 type BackendGroupsConfig map[string]*BackendGroupConfig
+
+// StagedForwardingConfig gives selected builders a head start for a deterministic
+// fraction of transaction and bundle submissions to a multicall group.
+type StagedForwardingConfig struct {
+	Enabled           bool         `toml:"enabled"`
+	Threshold         int          `toml:"threshold"`
+	Delay             TOMLDuration `toml:"delay"`
+	ImmediateBackends []string     `toml:"immediate_backends"`
+}
+
+func (b *BackendGroupConfig) validateStagedForwarding() error {
+	cfg := b.StagedForwarding
+	if !cfg.Enabled {
+		return nil
+	}
+	if b.RoutingStrategy != MulticallRoutingStrategy || b.ConsensusAware {
+		return fmt.Errorf("staged_forwarding requires routing_strategy = multicall")
+	}
+	if cfg.Threshold < 0 || cfg.Threshold > 10000 {
+		return fmt.Errorf("staged_forwarding threshold must be between 0 and 10000")
+	}
+	if cfg.Delay <= 0 {
+		return fmt.Errorf("staged_forwarding delay must be positive")
+	}
+	backends := make(map[string]bool, len(b.Backends))
+	for _, name := range b.Backends {
+		backends[name] = true
+	}
+	immediate := make(map[string]bool, len(cfg.ImmediateBackends))
+	for _, name := range cfg.ImmediateBackends {
+		if !backends[name] {
+			return fmt.Errorf("staged_forwarding immediate backend %s is not in this group", name)
+		}
+		if immediate[name] {
+			return fmt.Errorf("staged_forwarding immediate backend %s is duplicated", name)
+		}
+		immediate[name] = true
+	}
+	if len(immediate) == 0 || len(immediate) >= len(backends) {
+		return fmt.Errorf("staged_forwarding immediate_backends must be a non-empty proper subset of backends")
+	}
+	return nil
+}
 
 type MethodMappingsConfig map[string]string
 

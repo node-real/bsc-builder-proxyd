@@ -52,6 +52,80 @@ When an `eth_call` request is received:
 The matching is case-insensitive for both address and value fields. If no `value` is specified in the request, it defaults to "0x0".
 
 
+## Staged builder forwarding
+
+Enable staged forwarding on a `multicall` backend group to give selected builders
+a configurable head start for a deterministic fraction of submissions:
+
+```toml
+[backend_groups.multicall]
+backends = ["nodereal", "48club", "blockrazor"]
+routing_strategy = "multicall"
+
+[backend_groups.multicall.staged_forwarding]
+enabled = true
+threshold = 5000
+immediate_backends = ["nodereal"]
+delay = "100ms"
+```
+
+Enabling staged forwarding requires a reachable primary Redis URL in `[redis]`.
+Use the same `redis.namespace` and backend group name across process restarts and
+replicas that share the same builder configuration:
+
+```toml
+[redis]
+url = "$REDIS_URL"
+namespace = "builder-proxy"
+```
+
+For `eth_sendRawTransaction`, the routing hash is the canonical transaction hash.
+For `eth_sendBundle`, it is `Keccak256(txHash1 || txHash2 || ...)`, with each hash
+encoded as 32 bytes in transaction order. This bundle routing hash is independent
+of validity metadata and may differ from the bundle hash returned by a builder.
+The full hash is interpreted as an unsigned big-endian integer; requests where
+`hash % 10000 < threshold` go immediately to `immediate_backends`, and to the other
+eligible builders after `delay`. Nonmatching requests go to all eligible builders
+immediately. `threshold = 0` selects none; `threshold = 10000` selects all.
+
+The first successful response is returned as usual, without waiting for delayed
+builders. Delayed forwarding continues after the client request completes or is
+cancelled. Backend health filtering and retries follow existing multicall behavior;
+if no immediate builder is eligible, the request waits for the delayed builders.
+Malformed submissions whose hash cannot be calculated use normal immediate
+forwarding and upstream validation.
+
+The feature is disabled by default and requires a positive delay and a non-empty
+proper subset of the group's backends in `immediate_backends`. With the feature
+enabled, JSON-RPC batches are forwarded as individual requests so each submission
+gets its own hash and schedule. WebSocket routing is unaffected.
+
+Every transaction or bundle submission in an enabled group is saved to a separate
+Redis pending queue **before any builder is contacted**, including submissions
+that do not match the sampling threshold. The queue uses the primary Redis client,
+independently of the RPC response cache. Redis write failure rejects the request;
+it does not fall back to an in-memory queue, even if `fallback_to_memory` is enabled.
+
+Pending records have no TTL and retain the complete RPC request and forwarding
+headers. They are deleted only after every configured builder has returned an RPC
+response. A JSON-RPC rejection, including an expired bundle or already-known
+transaction, counts as completed delivery. Transport failures or skipped unhealthy
+builders leave the record pending for another broadcast attempt.
+
+Before opening its RPC listeners, proxyd checks Redis and broadcasts recoverable
+records to **all builders immediately**, bypassing sampling, delay and health
+filtering. This can make startup wait for the recovery broadcasts. It also checks
+for recoverable records every second while running. A process renews a 30-second
+owner lease so another replica does not prematurely broadcast its active delayed
+submissions. Normal shutdown releases this lease; after abrupt process death,
+recovery waits for the lease to expire, then broadcasts without the original delay.
+
+Recovery provides at-least-once delivery while the Redis records remain available:
+a crash after sending but before deleting the record can cause duplicate broadcasts.
+The recovery guarantee depends on retaining the Redis data and using the same
+namespace and enabled backend group configuration on restart. Failed deliveries
+remain in Redis until a later attempt receives responses from all builders.
+
 ## Usage
 
 Run `make proxyd` to build the binary. No additional dependencies are necessary.
