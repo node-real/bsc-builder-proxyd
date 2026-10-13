@@ -920,32 +920,33 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 	if len(targets) != len(bg.Backends) {
 		failed.Store(true)
 	}
-	delay := bg.multicallDelay(rpcReqs)
+	plan := bg.multicallPlan(rpcReqs)
+	delay := plan.delay
 	delayedUntil := time.Now().Add(delay)
 	var waiting atomic.Int32
 	if delay > 0 {
-		RecordStagedForwardingRequest(bg, rpcReqs[0].Method)
+		RecordStagedForwardingRequest(bg, rpcReqs[0].Method, plan.policyGroup)
 		for _, backend := range targets {
-			if !bg.isImmediateBackend(backend.Name) {
+			if !plan.isImmediateBackend(backend.Name) {
 				waiting.Add(1)
 			}
 		}
 		if waiting.Load() > 0 {
-			RecordStagedForwardingWaiting(bg, rpcReqs[0].Method, 1)
+			RecordStagedForwardingWaiting(bg, rpcReqs[0].Method, plan.policyGroup, 1)
 		}
 	}
 	for _, backend := range targets {
 		wg.Add(1)
 		go func(backend *Backend) {
 			defer wg.Done()
-			if delay > 0 && !bg.isImmediateBackend(backend.Name) {
+			if delay > 0 && !plan.isImmediateBackend(backend.Name) {
 				timer := time.NewTimer(time.Until(delayedUntil))
 				defer timer.Stop()
 				<-timer.C
 				if waiting.Add(-1) == 0 {
-					RecordStagedForwardingWaiting(bg, rpcReqs[0].Method, -1)
+					RecordStagedForwardingWaiting(bg, rpcReqs[0].Method, plan.policyGroup, -1)
 				}
-				RecordStagedForwardingDelayedForward(bg, backend.Name, rpcReqs[0].Method)
+				RecordStagedForwardingDelayedForward(bg, backend.Name, rpcReqs[0].Method, plan.policyGroup)
 			}
 			if !bg.multicallRequest(backend, rpcReqs, bgCtx, ch) {
 				failed.Store(true)

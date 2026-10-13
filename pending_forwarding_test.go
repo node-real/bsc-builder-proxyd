@@ -256,9 +256,9 @@ func TestPendingForwardingProcessRestart(t *testing.T) {
 		crash  bool
 	}{
 		{"eth_sendRawTransaction", false},
-		{"eth_sendBundle", true},
+		{"eth_sendRawTransaction", true},
 	} {
-		t.Run(tc.method, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/crash=%t", tc.method, tc.crash), func(t *testing.T) {
 			server, client := pendingTestRedis(t)
 			type received struct {
 				req    RPCReq

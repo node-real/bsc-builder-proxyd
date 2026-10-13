@@ -110,12 +110,15 @@ backends = ["nodereal", "48club", "blockrazor"]
 routing_strategy = "multicall"
 
 [backend_groups.multicall.staged_forwarding]
-# Disabled by default. Applies to eth_sendRawTransaction and eth_sendBundle,
-# including submissions inside JSON-RPC batches.
+# Disabled by default. Delay policies apply only to eth_sendRawTransaction,
+# including submissions inside JSON-RPC batches. Bundles are sent immediately.
 # When enabled, every submission is saved to Redis before forwarding. On restart,
 # recoverable pending submissions are broadcast to all builders without delay.
 # A live process owns a renewable 30s lease; abrupt exit waits for lease expiry.
 enabled = false
+
+[backend_groups.multicall.staged_forwarding.default]
+# Applied only when no from-address group matches.
 # Interpret the full hash as an unsigned big-endian integer. Select requests
 # with hash % 10000 < threshold: 0 selects none, 10000 selects all.
 threshold = 5000
@@ -123,8 +126,21 @@ threshold = 5000
 # in this group receive them after delay, even if a response has already returned.
 immediate_backends = ["nodereal"]
 delay = "100ms"
-# Transaction hash: canonical tx hash. Bundle routing hash: Keccak256 of the
-# ordered, concatenated 32-byte tx hashes (independent of validity metadata).
+
+# Address groups are ordered: the first matching group wins. Addresses are
+# recovered from the raw transaction signature and compared case-insensitively.
+[[backend_groups.multicall.staged_forwarding.groups]]
+name = "partner_senders"
+from_addresses = ["0x1111111111111111111111111111111111111111"]
+threshold = 10000
+immediate_backends = ["48club"]
+delay = "200ms"
+
+# Matching these senders disables the delay, without falling back to default.
+[[backend_groups.multicall.staged_forwarding.groups]]
+name = "immediate_senders"
+from_addresses = ["0x2222222222222222222222222222222222222222"]
+threshold = 0
 
 # If the authentication group below is in the config,
 # proxyd will only accept authenticated requests.

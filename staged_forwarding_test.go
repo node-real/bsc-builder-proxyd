@@ -67,7 +67,7 @@ func TestSubmissionHash(t *testing.T) {
 }
 
 func TestMulticallDelay(t *testing.T) {
-	for _, method := range []string{"eth_sendRawTransaction", "eth_sendBundle"} {
+	for _, method := range []string{"eth_sendRawTransaction"} {
 		t.Run(method, func(t *testing.T) {
 			req, _ := submissionTestRequest(t, method)
 			hash, err := submissionHash(req)
@@ -203,20 +203,28 @@ func TestStagedMulticallForwarding(t *testing.T) {
 				require.Equal(t, reqs[i].ID, response.ID)
 				require.Equal(t, "accepted", response.Result)
 			}
+			delayedArrivals := 0
 			for range reqs {
 				_ = awaitSubmission(t, first)
 				arrival := awaitSubmission(t, second)
-				if tc.enabled && tc.threshold > 0 {
-					require.GreaterOrEqual(t, arrival.Sub(start), delay)
+				if tc.enabled && tc.threshold > 0 && tc.method == "eth_sendRawTransaction" {
+					if arrival.Sub(start) >= delay {
+						delayedArrivals++
+						if !tc.fail {
+							require.True(t, returned.Before(arrival), "successful immediate response must not wait for delayed builders")
+						}
+					}
 					if !tc.fail {
 						require.Contains(t, servedBy, "builders/first")
-						require.True(t, returned.Before(arrival), "successful immediate response must not wait for delayed builders")
 					} else {
 						require.Equal(t, "builders/second", servedBy)
 					}
 				} else {
 					require.Less(t, arrival.Sub(start), delay)
 				}
+			}
+			if tc.enabled && tc.threshold > 0 && tc.method == "eth_sendRawTransaction" {
+				require.Equal(t, 1, delayedArrivals, "only the raw transaction is delayed, including in a mixed batch")
 			}
 		})
 	}

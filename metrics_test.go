@@ -53,26 +53,26 @@ func TestStagedForwardingMetrics(t *testing.T) {
 			if tc.malformed {
 				req.Params = json.RawMessage(`["0xdeadbeef"]`)
 			}
-			selected := tc.enabled && tc.threshold > 0 && !tc.malformed
+			selected := tc.enabled && tc.threshold > 0 && !tc.malformed && tc.method == "eth_sendRawTransaction"
 			res, _, err := bg.Forward(context.Background(), []*RPCReq{req}, false)
 			require.NoError(t, err)
 			require.Equal(t, "accepted", res[0].Result)
 			expected := float64(0)
 			if selected {
 				expected = 1
-				require.Equal(t, float64(1), metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, tc.method)), "two delayed builders must count as one waiting request")
+				require.Equal(t, float64(1), metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, tc.method, defaultStagedPolicyGroup)), "two delayed builders must count as one waiting request")
 				for _, backend := range []string{"first", "second", "third"} {
-					require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, backend, tc.method)), "count actual forwarding starts, not scheduling")
+					require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, backend, tc.method, defaultStagedPolicyGroup)), "count actual forwarding starts, not scheduling")
 				}
 			}
-			require.Equal(t, expected, metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, tc.method)))
+			require.Equal(t, expected, metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, tc.method, defaultStagedPolicyGroup)))
 			awaitSubmission(t, first)
 			awaitSubmission(t, second)
 			awaitSubmission(t, third)
-			require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, tc.method)))
-			require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, "first", tc.method)))
+			require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, tc.method, defaultStagedPolicyGroup)))
+			require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, "first", tc.method, defaultStagedPolicyGroup)))
 			for _, backend := range []string{"second", "third"} {
-				require.Equal(t, expected, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, backend, tc.method)))
+				require.Equal(t, expected, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, backend, tc.method, defaultStagedPolicyGroup)))
 			}
 			require.Zero(t, metricValue(t, pendingForwardingRecoveryRequestsTotal.WithLabelValues(bg.Name, tc.method)))
 			if bg.pendingForwarding != nil {
@@ -96,9 +96,9 @@ func TestStagedForwardingMetricsPersistenceFailure(t *testing.T) {
 	_, _, err := bg.Forward(context.Background(), []*RPCReq{req}, false)
 	require.ErrorContains(t, err, "cannot persist builder submission")
 	require.Len(t, arrivals, 0)
-	require.Zero(t, metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, req.Method)))
-	require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, req.Method)))
-	require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, "first", req.Method)))
+	require.Zero(t, metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, req.Method, defaultStagedPolicyGroup)))
+	require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, req.Method, defaultStagedPolicyGroup)))
+	require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, "first", req.Method, defaultStagedPolicyGroup)))
 }
 
 func TestStagedForwardingMetricsNoDelayedTargets(t *testing.T) {
@@ -115,9 +115,9 @@ func TestStagedForwardingMetricsNoDelayedTargets(t *testing.T) {
 	_, _, err := bg.Forward(context.Background(), []*RPCReq{req}, false)
 	require.NoError(t, err)
 	awaitSubmission(t, arrivals)
-	require.Equal(t, float64(1), metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, req.Method)))
-	require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, req.Method)), "sampling alone does not imply an eligible delayed target")
-	require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, "second", req.Method)))
+	require.Equal(t, float64(1), metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, req.Method, defaultStagedPolicyGroup)))
+	require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, req.Method, defaultStagedPolicyGroup)), "sampling alone does not imply an eligible delayed target")
+	require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, "second", req.Method, defaultStagedPolicyGroup)))
 }
 
 func TestPendingForwardingRecoveryMetrics(t *testing.T) {
@@ -143,9 +143,9 @@ func TestPendingForwardingRecoveryMetrics(t *testing.T) {
 	awaitSubmission(t, second)
 	require.Equal(t, float64(1), metricValue(t, pendingForwardingRecoveryRequestsTotal.WithLabelValues(bg.Name, req.Method)), "one record broadcast to two builders is one recovery request")
 	require.Zero(t, metricValue(t, pendingForwardingRecords.WithLabelValues(bg.Name)))
-	require.Zero(t, metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, req.Method)))
-	require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, req.Method)))
+	require.Zero(t, metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, req.Method, defaultStagedPolicyGroup)))
+	require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, req.Method, defaultStagedPolicyGroup)))
 	for _, backend := range []string{"first", "second"} {
-		require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, backend, req.Method)), "recovery is not delayed forwarding")
+		require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, backend, req.Method, defaultStagedPolicyGroup)), "recovery is not delayed forwarding")
 	}
 }

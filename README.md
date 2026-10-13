@@ -55,7 +55,8 @@ The matching is case-insensitive for both address and value fields. If no `value
 ## Staged builder forwarding
 
 Enable staged forwarding on a `multicall` backend group to give selected builders
-a configurable head start for a deterministic fraction of submissions:
+a configurable head start for a deterministic fraction of `eth_sendRawTransaction`
+requests. Policies can be selected by the transaction's signed `from` address:
 
 ```toml
 [backend_groups.multicall]
@@ -64,10 +65,46 @@ routing_strategy = "multicall"
 
 [backend_groups.multicall.staged_forwarding]
 enabled = true
+
+[backend_groups.multicall.staged_forwarding.default]
 threshold = 5000
 immediate_backends = ["nodereal"]
 delay = "100ms"
+
+[[backend_groups.multicall.staged_forwarding.groups]]
+name = "partner_senders"
+from_addresses = ["0x1111111111111111111111111111111111111111"]
+threshold = 10000
+immediate_backends = ["48club"]
+delay = "200ms"
+
+[[backend_groups.multicall.staged_forwarding.groups]]
+name = "immediate_senders"
+from_addresses = ["0x2222222222222222222222222222222222222222"]
+threshold = 0
 ```
+
+Sender addresses are recovered from the raw transaction signature with the
+transaction's chain ID. Address matching is case-insensitive and groups are
+checked in TOML array order; the first matching group supplies the complete
+policy. Each group has independent `threshold`, `delay` and `immediate_backends`.
+Only transactions that do not match any address group use `default`. A matching
+group's threshold miss means immediate broadcasting, without trying another
+group or default. `threshold = 0` disables the delay for that group and needs no
+delay or immediate builder configuration.
+
+An explicit `default` policy is required when `groups` are configured. Group names
+must be non-empty, unique, and cannot be `default`; malformed or repeated addresses
+within a group are rejected at startup. If an address appears in multiple groups,
+configuration order decides which policy applies. Transactions whose signatures
+cannot yield a sender use `default` and remain subject to upstream validation.
+`eth_sendBundle` always uses normal immediate multicall forwarding and does not
+enter the address-group or default delay policy.
+
+For compatibility, the previous flat `threshold`, `delay` and `immediate_backends`
+under `[backend_groups.<name>.staged_forwarding]` still act as the default raw
+transaction policy when no `default` or `groups` are configured. Do not combine
+these legacy flat fields with the new nested `default` configuration.
 
 Enabling staged forwarding requires a reachable primary Redis URL in `[redis]`.
 Use the same `redis.namespace` and backend group name across process restarts and
@@ -80,9 +117,6 @@ namespace = "builder-proxy"
 ```
 
 For `eth_sendRawTransaction`, the routing hash is the canonical transaction hash.
-For `eth_sendBundle`, it is `Keccak256(txHash1 || txHash2 || ...)`, with each hash
-encoded as 32 bytes in transaction order. This bundle routing hash is independent
-of validity metadata and may differ from the bundle hash returned by a builder.
 The full hash is interpreted as an unsigned big-endian integer; requests where
 `hash % 10000 < threshold` go immediately to `immediate_backends`, and to the other
 eligible builders after `delay`. Nonmatching requests go to all eligible builders
@@ -95,10 +129,11 @@ if no immediate builder is eligible, the request waits for the delayed builders.
 Malformed submissions whose hash cannot be calculated use normal immediate
 forwarding and upstream validation.
 
-The feature is disabled by default and requires a positive delay and a non-empty
-proper subset of the group's backends in `immediate_backends`. With the feature
-enabled, JSON-RPC batches are forwarded as individual requests so each submission
-gets its own hash and schedule. WebSocket routing is unaffected.
+The feature is disabled by default. Each policy with `threshold > 0` requires a
+positive delay and a non-empty proper subset of the backend group's builders in
+`immediate_backends`. With the feature enabled, JSON-RPC batches are forwarded as
+individual requests, so each raw transaction gets its own policy and schedule.
+WebSocket routing is unaffected.
 
 Every transaction or bundle submission in an enabled group is saved to a separate
 Redis pending queue **before any builder is contacted**, including submissions
@@ -224,13 +259,15 @@ requests, per-builder forwarding, live delay timers and durable recovery:
 
 | Metric | Labels | Counting rule |
 | --- | --- | --- |
-| `proxyd_staged_forwarding_requests_total` | `backend_group`, `method_name` | One per request matching the sampling threshold after Redis persistence succeeds. A bundle counts as one request, regardless of its transaction count. |
-| `proxyd_staged_forwarding_delayed_forwards_total` | `backend_group`, `backend_name`, `method_name` | One when a delayed builder's timer expires and forwarding starts. Excludes immediate builders, backend retries and recovery broadcasts; does not imply builder acceptance. |
-| `proxyd_staged_forwarding_waiting_requests` | `backend_group`, `method_name` | Requests in this process with at least one builder still waiting for its delay. Each request counts once even if multiple builders are waiting. Decreases when the last timer expires, before network forwarding completes. |
+| `proxyd_staged_forwarding_requests_total` | `backend_group`, `method_name`, `policy_group` | One per raw transaction request matching its selected policy's threshold after Redis persistence succeeds. |
+| `proxyd_staged_forwarding_delayed_forwards_total` | `backend_group`, `backend_name`, `method_name`, `policy_group` | One when a delayed builder's timer expires and forwarding starts. Excludes immediate builders, backend retries and recovery broadcasts; does not imply builder acceptance. |
+| `proxyd_staged_forwarding_waiting_requests` | `backend_group`, `method_name`, `policy_group` | Requests in this process with at least one builder still waiting for its delay. Each request counts once even if multiple builders are waiting. Decreases when the last timer expires, before network forwarding completes. |
 | `proxyd_pending_forwarding_recovery_requests_total` | `backend_group`, `method_name` | One per successfully claimed record broadcast during recovery. Repeated recovery attempts count again. |
 | `proxyd_pending_forwarding_records` | `backend_group` | Redis `HLEN` of the shared pending queue, including active submissions, failed sends and orphaned records. Sampled after startup and background recovery scans. |
 
-`method_name` distinguishes `eth_sendRawTransaction` from `eth_sendBundle`.
+`policy_group` is the matched group name or `default`. Delay metrics only count
+`eth_sendRawTransaction`; `method_name` on the Redis recovery counter still
+distinguishes transactions from bundles, with a bundle counting as one request.
 For one selected request sent immediately to one builder and after a delay to
 two others, the selected-request counter increases by one, the delayed-forward
 counter increases by two in total, and the waiting gauge changes from one to zero.
@@ -239,7 +276,7 @@ Counters measure submission/forwarding events, not distinct transaction hashes.
 Example PromQL for selected requests over the last hour:
 
 ```promql
-sum by (backend_group, method_name) (
+sum by (backend_group, policy_group, method_name) (
   increase(proxyd_staged_forwarding_requests_total[1h])
 )
 ```
