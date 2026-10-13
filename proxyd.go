@@ -386,6 +386,7 @@ func Start(config *Config) (*Server, func(), error) {
 		store, err := newPendingForwardingStore(redisClient, config.Redis.Namespace, bg)
 		if err == nil {
 			bg.pendingForwarding = store
+			InitStagedForwardingMetrics(bg)
 			err = store.recoverPending()
 		}
 		if err != nil {

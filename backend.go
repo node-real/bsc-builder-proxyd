@@ -922,6 +922,18 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 	}
 	delay := bg.multicallDelay(rpcReqs)
 	delayedUntil := time.Now().Add(delay)
+	var waiting atomic.Int32
+	if delay > 0 {
+		RecordStagedForwardingRequest(bg, rpcReqs[0].Method)
+		for _, backend := range targets {
+			if !bg.isImmediateBackend(backend.Name) {
+				waiting.Add(1)
+			}
+		}
+		if waiting.Load() > 0 {
+			RecordStagedForwardingWaiting(bg, rpcReqs[0].Method, 1)
+		}
+	}
 	for _, backend := range targets {
 		wg.Add(1)
 		go func(backend *Backend) {
@@ -930,6 +942,10 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 				timer := time.NewTimer(time.Until(delayedUntil))
 				defer timer.Stop()
 				<-timer.C
+				if waiting.Add(-1) == 0 {
+					RecordStagedForwardingWaiting(bg, rpcReqs[0].Method, -1)
+				}
+				RecordStagedForwardingDelayedForward(bg, backend.Name, rpcReqs[0].Method)
 			}
 			if !bg.multicallRequest(backend, rpcReqs, bgCtx, ch) {
 				failed.Store(true)

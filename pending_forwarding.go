@@ -209,13 +209,29 @@ func (s *pendingForwardingStore) recoverPending() error {
 			}
 			record.value = string(encoded)
 			log.Info("recovering pending builder submission", "backend_group", s.group.Name, "record_id", record.id, "method", record.submission.Request.Method)
+			RecordPendingForwardingRecoveryRequest(s.group, record.submission.Request.Method)
 			s.finish(record, s.broadcast(record.submission))
 		}
 		cursor = next
 		if cursor == 0 {
+			s.recordPendingQueueSize()
 			return nil
 		}
 	}
+}
+
+func (s *pendingForwardingStore) recordPendingQueueSize() {
+	ctx, cancel := context.WithTimeout(s.ctx, pendingRedisTimeout)
+	defer cancel()
+	count, err := s.client.HLen(ctx, s.pendingKey()).Result()
+	if err != nil {
+		if s.ctx.Err() == nil {
+			RecordRedisError("PendingForwardingMetrics")
+			log.Error("cannot sample pending forwarding queue size", "backend_group", s.group.Name, "err", err)
+		}
+		return
+	}
+	RecordPendingForwardingRecords(s.group, count)
 }
 
 func (s *pendingForwardingStore) broadcast(submission pendingSubmission) bool {

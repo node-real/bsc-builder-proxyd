@@ -210,6 +210,54 @@ See `metrics.go` for a list of all available metrics.
 
 The metrics port is configurable via the `metrics.port` and `metrics.host` keys in the config.
 
+Enable the Prometheus endpoint for staged forwarding monitoring:
+
+```toml
+[metrics]
+enabled = true
+host = "0.0.0.0"
+port = 9761
+```
+
+Scrape `/metrics` on that port. The following metrics distinguish submitted
+requests, per-builder forwarding, live delay timers and durable recovery:
+
+| Metric | Labels | Counting rule |
+| --- | --- | --- |
+| `proxyd_staged_forwarding_requests_total` | `backend_group`, `method_name` | One per request matching the sampling threshold after Redis persistence succeeds. A bundle counts as one request, regardless of its transaction count. |
+| `proxyd_staged_forwarding_delayed_forwards_total` | `backend_group`, `backend_name`, `method_name` | One when a delayed builder's timer expires and forwarding starts. Excludes immediate builders, backend retries and recovery broadcasts; does not imply builder acceptance. |
+| `proxyd_staged_forwarding_waiting_requests` | `backend_group`, `method_name` | Requests in this process with at least one builder still waiting for its delay. Each request counts once even if multiple builders are waiting. Decreases when the last timer expires, before network forwarding completes. |
+| `proxyd_pending_forwarding_recovery_requests_total` | `backend_group`, `method_name` | One per successfully claimed record broadcast during recovery. Repeated recovery attempts count again. |
+| `proxyd_pending_forwarding_records` | `backend_group` | Redis `HLEN` of the shared pending queue, including active submissions, failed sends and orphaned records. Sampled after startup and background recovery scans. |
+
+`method_name` distinguishes `eth_sendRawTransaction` from `eth_sendBundle`.
+For one selected request sent immediately to one builder and after a delay to
+two others, the selected-request counter increases by one, the delayed-forward
+counter increases by two in total, and the waiting gauge changes from one to zero.
+Counters measure submission/forwarding events, not distinct transaction hashes.
+
+Example PromQL for selected requests over the last hour:
+
+```promql
+sum by (backend_group, method_name) (
+  increase(proxyd_staged_forwarding_requests_total[1h])
+)
+```
+
+For the current number of requests still waiting across replicas, sum
+`proxyd_staged_forwarding_waiting_requests`. Replicas sharing a Redis namespace
+and backend group report the same Redis queue size: use `max`, not `sum`, for
+`proxyd_pending_forwarding_records`, filtering to the same service and namespace:
+
+```promql
+max by (backend_group) (proxyd_pending_forwarding_records)
+```
+
+Recovery scans run every second when idle; long recovery broadcasts can delay
+queue-size samples. On a Redis sampling error the last successful gauge value
+is retained and `proxyd_redis_errors_total{source="PendingForwardingMetrics"}`
+is incremented.
+
 ## Adding Backend SSL Certificates in Docker
 
 The Docker image runs on Alpine Linux. If you get SSL errors when connecting to a backend within Docker, you may need to add additional certificates to Alpine's certificate store. To do this, bind mount the certificate bundle into a file in `/usr/local/share/ca-certificates`. The `entrypoint.sh` script will then update the store with whatever is in the `ca-certificates` directory prior to starting `proxyd`.
