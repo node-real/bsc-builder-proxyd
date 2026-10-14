@@ -461,6 +461,12 @@ var (
 		"error",
 	})
 
+	stagedForwardingRedisFallbackRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: MetricsNamespace,
+		Name:      "staged_forwarding_redis_fallback_requests_total",
+		Help:      "Submission requests broadcast immediately to all configured builders after Redis persistence fails.",
+	}, []string{"backend_group", "method_name"})
+
 	stagedForwardingRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: MetricsNamespace,
 		Name:      "staged_forwarding_requests_total",
@@ -482,13 +488,13 @@ var (
 	pendingForwardingRecoveryRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: MetricsNamespace,
 		Name:      "pending_forwarding_recovery_requests_total",
-		Help:      "Pending submission recovery broadcasts, counted once per successfully claimed record; repeated recovery attempts are counted again.",
+		Help:      "Startup recovery broadcasts, counted once per decoded pending record attempted; repeated attempts and simultaneous startups are counted again.",
 	}, []string{"backend_group", "method_name"})
 
 	pendingForwardingRecords = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: MetricsNamespace,
 		Name:      "pending_forwarding_records",
-		Help:      "Total records in the shared Redis pending queue, sampled after recovery scans; includes active, failed and orphaned submissions.",
+		Help:      "Total records in the shared Redis pending index, sampled on saves, successful completions and startup recovery; may be stale while idle.",
 	}, []string{"backend_group"})
 )
 
@@ -673,6 +679,7 @@ func InitStagedForwardingMetrics(bg *BackendGroup) {
 		policyGroups = append(policyGroups, group.Name)
 	}
 	for _, method := range []string{"eth_sendRawTransaction", "eth_sendBundle"} {
+		stagedForwardingRedisFallbackRequestsTotal.WithLabelValues(bg.Name, method)
 		pendingForwardingRecoveryRequestsTotal.WithLabelValues(bg.Name, method)
 		if method != "eth_sendRawTransaction" {
 			continue

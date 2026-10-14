@@ -8,6 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -76,7 +77,7 @@ func TestStagedForwardingMetrics(t *testing.T) {
 			}
 			require.Zero(t, metricValue(t, pendingForwardingRecoveryRequestsTotal.WithLabelValues(bg.Name, tc.method)))
 			if bg.pendingForwarding != nil {
-				require.Eventually(t, func() bool { return client.HLen(context.Background(), bg.pendingForwarding.pendingKey()).Val() == 0 }, time.Second, 10*time.Millisecond)
+				require.Eventually(t, func() bool { return client.ZCard(context.Background(), bg.pendingForwarding.pendingKey()).Val() == 0 }, time.Second, 10*time.Millisecond)
 			}
 		})
 	}
@@ -91,14 +92,21 @@ func TestStagedForwardingMetricsPersistenceFailure(t *testing.T) {
 		stagedForwarding: StagedForwardingConfig{Enabled: true, Threshold: 10000, Delay: TOMLDuration(time.Second)},
 	}
 	bg.pendingForwarding = pendingTestStore(t, client, bg)
-	require.NoError(t, client.Del(context.Background(), bg.pendingForwarding.ownerKey(bg.pendingForwarding.owner)).Err())
+	client.AddHook(pendingRedisTestHook{process: func(ctx context.Context, cmd redis.Cmder, next redis.ProcessHook) error {
+		if pendingSaveCommand(cmd) {
+			return context.DeadlineExceeded
+		}
+		return next(ctx, cmd)
+	}})
 	req, _ := submissionTestRequest(t, "eth_sendRawTransaction")
 	_, _, err := bg.Forward(context.Background(), []*RPCReq{req}, false)
-	require.ErrorContains(t, err, "cannot persist builder submission")
-	require.Len(t, arrivals, 0)
+	require.NoError(t, err)
+	awaitSubmission(t, arrivals)
+	require.Equal(t, float64(1), metricValue(t, stagedForwardingRedisFallbackRequestsTotal.WithLabelValues(bg.Name, req.Method)))
 	require.Zero(t, metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, req.Method, defaultStagedPolicyGroup)))
 	require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, req.Method, defaultStagedPolicyGroup)))
 	require.Zero(t, metricValue(t, stagedForwardingDelayedForwardsTotal.WithLabelValues(bg.Name, "first", req.Method, defaultStagedPolicyGroup)))
+	awaitPendingSendsComplete(t, bg.pendingForwarding)
 }
 
 func TestStagedForwardingMetricsNoDelayedTargets(t *testing.T) {
@@ -133,11 +141,11 @@ func TestPendingForwardingRecoveryMetrics(t *testing.T) {
 	req, _ := submissionTestRequest(t, "eth_sendBundle")
 	_, err := original.save(context.Background(), req)
 	require.NoError(t, err)
-	// Live owners are skipped but their records are part of the Redis backlog.
-	require.NoError(t, recovery.recoverPending())
+	// A normal running instance does not read or replay its own pending queue.
+	original.startupComplete.Store(true)
+	require.NoError(t, original.recoverPending())
 	require.Equal(t, float64(1), metricValue(t, pendingForwardingRecords.WithLabelValues(bg.Name)))
 	require.Zero(t, metricValue(t, pendingForwardingRecoveryRequestsTotal.WithLabelValues(bg.Name, req.Method)))
-	original.stop()
 	require.NoError(t, recovery.recoverPending())
 	awaitSubmission(t, first)
 	awaitSubmission(t, second)

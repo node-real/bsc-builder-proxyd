@@ -114,7 +114,10 @@ routing_strategy = "multicall"
 # including submissions inside JSON-RPC batches. Bundles are sent immediately.
 # When enabled, every submission is saved to Redis before forwarding. On restart,
 # recoverable pending submissions are broadcast to all builders without delay.
-# A live process owns a renewable 30s lease; abrupt exit waits for lease expiry.
+# Only startup recovery reads and broadcasts queued transactions; there are no process leases.
+# An interrupted startup scan is retried until it succeeds, then the task stops.
+# Each complete transaction request is retained for 30min from its first write.
+# Pending Redis operations time out after 20ms; failures broadcast to all builders immediately.
 enabled = false
 
 [backend_groups.multicall.staged_forwarding.default]

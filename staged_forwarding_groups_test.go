@@ -247,6 +247,6 @@ func TestStagedForwardingGroupForwarding(t *testing.T) {
 		}
 		require.Equal(t, float64(1), metricValue(t, stagedForwardingRequestsTotal.WithLabelValues(bg.Name, req.Method, tc.group)))
 		require.Zero(t, metricValue(t, stagedForwardingWaitingRequests.WithLabelValues(bg.Name, req.Method, tc.group)))
-		require.Eventually(t, func() bool { return client.HLen(context.Background(), bg.pendingForwarding.pendingKey()).Val() == 0 }, time.Second, 10*time.Millisecond)
+		require.Eventually(t, func() bool { return client.ZCard(context.Background(), bg.pendingForwarding.pendingKey()).Val() == 0 }, time.Second, 10*time.Millisecond)
 	}
 }

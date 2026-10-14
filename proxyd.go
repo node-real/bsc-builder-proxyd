@@ -61,7 +61,9 @@ func Start(config *Config) (*Server, func(), error) {
 			return nil, nil, err
 		}
 		if err := CheckRedisConnection(redisClient); err != nil {
-			if config.Redis.FallbackToMemory && !needsPendingForwarding {
+			if needsPendingForwarding {
+				log.Warn("failed to connect to redis; builder submissions will broadcast immediately until persistence succeeds", "err", err)
+			} else if config.Redis.FallbackToMemory {
 				log.Warn("failed to connect to redis, may fall back to in-memory cache", "err", err)
 			} else {
 				return nil, nil, err
@@ -86,7 +88,7 @@ func Start(config *Config) (*Server, func(), error) {
 		}
 
 		if err := CheckRedisConnection(redisClient); err != nil {
-			if config.Redis.FallbackToMemory {
+			if needsPendingForwarding || config.Redis.FallbackToMemory {
 				log.Warn("failed to connect to redis, may fall back to in-memory cache", "err", err)
 			} else {
 				return nil, nil, err
@@ -377,27 +379,19 @@ func Start(config *Config) (*Server, func(), error) {
 		return nil, nil, fmt.Errorf("error creating server: %w", err)
 	}
 
-	// Recover durable submissions before opening listeners. A background scan
-	// also picks up records whose crashed owner lease has not expired yet.
-	for name, bg := range backendGroups {
+	// Broadcast all preexisting pending submissions before opening listeners,
+	// with no process lease or periodic runtime transaction scans.
+	for _, bg := range backendGroups {
 		if !bg.stagedForwarding.Enabled {
 			continue
 		}
-		store, err := newPendingForwardingStore(redisClient, config.Redis.Namespace, bg)
-		if err == nil {
-			bg.pendingForwarding = store
-			InitStagedForwardingMetrics(bg)
-			err = store.recoverPending()
+		store := newPendingForwardingStore(redisClient, config.Redis.Namespace, bg)
+		bg.pendingForwarding = store
+		InitStagedForwardingMetrics(bg)
+		if err := store.recoverPending(); err != nil {
+			log.Warn("pending forwarding recovery unavailable; continuing with immediate broadcast on persistence failure", "backend_group", bg.Name, "err", err)
 		}
-		if err != nil {
-			for _, initialized := range backendGroups {
-				if initialized.pendingForwarding != nil {
-					initialized.pendingForwarding.stop()
-				}
-			}
-			return nil, nil, fmt.Errorf("backend group %s: initialize pending forwarding: %w", name, err)
-		}
-		store.startRecovery()
+		store.retryStartupRecovery()
 	}
 
 	// Enable to support browser websocket connections.

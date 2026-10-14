@@ -878,13 +878,15 @@ type multicallTuple struct {
 // Note: rpcReqs should only contain 1 request of 'sendRawTransactions'
 func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq) *BackendGroupRPCResponse {
 	var pending *pendingRecord
+	redisFallback := false
 	if bg.pendingForwarding != nil && isValidMulticallTx(rpcReqs) {
 		var err error
 		pending, err = bg.pendingForwarding.save(ctx, rpcReqs[0])
 		if err != nil {
 			RecordRedisError("PendingForwardingSave")
-			log.Error("cannot persist builder submission", "backend_group", bg.Name, "err", err)
-			return &BackendGroupRPCResponse{error: wrapErr(err, "cannot persist builder submission")}
+			stagedForwardingRedisFallbackRequestsTotal.WithLabelValues(bg.Name, rpcReqs[0].Method).Inc()
+			log.Warn("cannot persist builder submission; broadcasting immediately to all builders", "backend_group", bg.Name, "err", err)
+			redisFallback = true
 		}
 	}
 	// Create ctx without cancel so background tasks process
@@ -898,7 +900,7 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 	var wg sync.WaitGroup
 	targets := make([]*Backend, 0, len(bg.Backends))
 	for _, backend := range bg.Backends {
-		if backend.IsHealthy() {
+		if redisFallback || backend.IsHealthy() {
 			targets = append(targets, backend)
 			continue
 		}
@@ -920,7 +922,10 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 	if len(targets) != len(bg.Backends) {
 		failed.Store(true)
 	}
-	plan := bg.multicallPlan(rpcReqs)
+	var plan stagedForwardingPlan
+	if !redisFallback {
+		plan = bg.multicallPlan(rpcReqs)
+	}
 	delay := plan.delay
 	delayedUntil := time.Now().Add(delay)
 	var waiting atomic.Int32

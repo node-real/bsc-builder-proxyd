@@ -106,7 +106,7 @@ under `[backend_groups.<name>.staged_forwarding]` still act as the default raw
 transaction policy when no `default` or `groups` are configured. Do not combine
 these legacy flat fields with the new nested `default` configuration.
 
-Enabling staged forwarding requires a reachable primary Redis URL in `[redis]`.
+Enabling staged forwarding requires a primary Redis URL in `[redis]`.
 Use the same `redis.namespace` and backend group name across process restarts and
 replicas that share the same builder configuration:
 
@@ -135,31 +135,63 @@ positive delay and a non-empty proper subset of the backend group's builders in
 individual requests, so each raw transaction gets its own policy and schedule.
 WebSocket routing is unaffected.
 
-Every transaction or bundle submission in an enabled group is saved to a separate
-Redis pending queue **before any builder is contacted**, including submissions
+Every transaction or bundle submission in an enabled group first attempts to save
+to a separate Redis pending queue **before any builder is contacted**, including submissions
 that do not match the sampling threshold. The queue uses the primary Redis client,
-independently of the RPC response cache. Redis write failure rejects the request;
-it does not fall back to an in-memory queue, even if `fallback_to_memory` is enabled.
+independently of the RPC response cache. Only a confirmed successful write enables
+the raw transaction's staged forwarding policy. On a Redis error or timeout,
+the submission is broadcast immediately to **all configured builders**,
+bypassing sampling, delay and health filtering. Builder responses determine the RPC
+result as usual. Redis operations respect context deadlines (up to 20 milliseconds for
+pending operations) in both standalone and cluster modes; fallback begins after
+the write attempt fails. This behavior is independent of `fallback_to_memory`.
 
-Pending records have no TTL and retain the complete RPC request and forwarding
-headers. They are deleted only after every configured builder has returned an RPC
-response. A JSON-RPC rejection, including an expired bundle or already-known
+Each pending record retains the complete RPC request, including raw signed
+transaction bytes in `params`, and forwarding headers in an individual Redis
+string with a **30-minute TTL from its first successful write**. Startup broadcasts
+preserve the remaining TTL; new submissions do not extend older records. Records
+are deleted early after every configured builder has returned an RPC response.
+A JSON-RPC rejection, including an expired bundle or already-known
 transaction, counts as completed delivery. Transport failures or skipped unhealthy
-builders leave the record pending for another broadcast attempt.
+builders leave the record pending for the next Pod startup until its TTL expires.
 
-Before opening its RPC listeners, proxyd checks Redis and broadcasts recoverable
-records to **all builders immediately**, bypassing sampling, delay and health
-filtering. This can make startup wait for the recovery broadcasts. It also checks
-for recoverable records every second while running. A process renews a 30-second
-owner lease so another replica does not prematurely broadcast its active delayed
-submissions. Normal shutdown releases this lease; after abrupt process death,
-recovery waits for the lease to expire, then broadcasts without the original delay.
+Keys share the prefix `<redis.namespace>:staged_forwarding:{<hex backend group name>}`:
+`:record:<request ID>` stores the full payload, `:pending_index` is a sorted-set
+index of record IDs and expiry times. There are no process leases, owner keys or
+heartbeats. The index also expires 30 minutes after its last new record and
+expired entries are removed on writes, successful completions and startup recovery.
+Old `:pending` hash records are
+atomically migrated to the new format before recovery, with 30 minutes of retention
+from migration, preserving their complete requests and headers.
+
+Before opening its RPC listeners, proxyd checks Redis and broadcasts **all
+preexisting, unexpired pending records** in each enabled backend group's namespace
+to **all builders immediately**, bypassing sampling, delay and health filtering.
+This also intentionally advances existing queued submissions from other live
+replicas sharing the same namespace and backend group. The startup
+scan uses a fixed cutoff so concurrent new submissions retain their normal policy.
+This can make startup wait for the recovery broadcasts.
+
+After startup recovery finishes, the instance never scans or reads queued
+transaction payloads during normal operation. It only writes new requests and
+deletes records after a complete successful broadcast. Failed deliveries and
+failed cleanup remain available for the next startup, bounded by the record TTL.
+If Redis is unavailable during startup, proxyd still starts and uses immediate
+broadcast whenever persistence fails. It retries only the interrupted startup
+recovery pass every second and stops that task once the scan succeeds. Subsequent
+successful writes use the configured policy; new submissions received during
+startup recovery retain their own forwarding schedule.
 
 Recovery provides at-least-once delivery while the Redis records remain available:
-a crash after sending but before deleting the record can cause duplicate broadcasts.
+a crash after sending but before deleting the record, or simultaneous Pod startups,
+can cause duplicate broadcasts. There is no distributed claim or lease coordination.
 The recovery guarantee depends on retaining the Redis data and using the same
-namespace and enabled backend group configuration on restart. Failed deliveries
-remain in Redis until a later attempt receives responses from all builders.
+namespace and enabled backend group configuration on restart within the record's
+30-minute retention window. Failed deliveries remain in Redis until a later attempt
+receives responses from all builders or the record expires.
+During a Redis outage, submissions that were not persisted have no durable restart
+recovery guarantee: immediate broadcasting minimizes the interruption, but a
+process crash before sending to every builder can still lose unsent deliveries.
 
 ## Usage
 
@@ -259,11 +291,12 @@ requests, per-builder forwarding, live delay timers and durable recovery:
 
 | Metric | Labels | Counting rule |
 | --- | --- | --- |
+| `proxyd_staged_forwarding_redis_fallback_requests_total` | `backend_group`, `method_name` | One per transaction or bundle request broadcast immediately to all configured builders because Redis persistence failed. These requests do not increment delay metrics. |
 | `proxyd_staged_forwarding_requests_total` | `backend_group`, `method_name`, `policy_group` | One per raw transaction request matching its selected policy's threshold after Redis persistence succeeds. |
 | `proxyd_staged_forwarding_delayed_forwards_total` | `backend_group`, `backend_name`, `method_name`, `policy_group` | One when a delayed builder's timer expires and forwarding starts. Excludes immediate builders, backend retries and recovery broadcasts; does not imply builder acceptance. |
 | `proxyd_staged_forwarding_waiting_requests` | `backend_group`, `method_name`, `policy_group` | Requests in this process with at least one builder still waiting for its delay. Each request counts once even if multiple builders are waiting. Decreases when the last timer expires, before network forwarding completes. |
-| `proxyd_pending_forwarding_recovery_requests_total` | `backend_group`, `method_name` | One per successfully claimed record broadcast during recovery. Repeated recovery attempts count again. |
-| `proxyd_pending_forwarding_records` | `backend_group` | Redis `HLEN` of the shared pending queue, including active submissions, failed sends and orphaned records. Sampled after startup and background recovery scans. |
+| `proxyd_pending_forwarding_recovery_requests_total` | `backend_group`, `method_name` | One per decoded pending record broadcast during startup recovery. Repeated attempts or simultaneous startups count again. |
+| `proxyd_pending_forwarding_records` | `backend_group` | Redis `ZCARD` of the shared pending index after expired entries are removed, including active submissions and failed sends. Sampled on saves, successful completions and startup recovery. |
 
 `policy_group` is the matched group name or `default`. Delay metrics only count
 `eth_sendRawTransaction`; `method_name` on the Redis recovery counter still
@@ -290,8 +323,9 @@ and backend group report the same Redis queue size: use `max`, not `sum`, for
 max by (backend_group) (proxyd_pending_forwarding_records)
 ```
 
-Recovery scans run every second when idle; long recovery broadcasts can delay
-queue-size samples. On a Redis sampling error the last successful gauge value
+There are no periodic runtime queue-size reads. The pending gauge reports the
+last successful write/completion/startup sample and can remain stale during idle
+periods as records expire. On a Redis sampling error the last successful gauge value
 is retained and `proxyd_redis_errors_total{source="PendingForwardingMetrics"}`
 is incremented.
 
