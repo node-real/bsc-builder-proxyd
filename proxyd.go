@@ -32,6 +32,16 @@ func Start(config *Config) (*Server, func(), error) {
 	if len(config.RPCMethodMappings) == 0 {
 		return nil, nil, errors.New("must define at least one RPC method mapping")
 	}
+	needsPendingForwarding := false
+	for name, group := range config.BackendGroups {
+		if err := group.validateStagedForwarding(); err != nil {
+			return nil, nil, fmt.Errorf("backend group %s: %w", name, err)
+		}
+		needsPendingForwarding = needsPendingForwarding || group.StagedForwarding.Enabled
+	}
+	if needsPendingForwarding && config.Redis.URL == "" {
+		return nil, nil, errors.New("staged_forwarding requires a Redis primary URL for pending submission recovery")
+	}
 
 	for authKey := range config.Authentication {
 		if authKey == "none" {
@@ -51,7 +61,9 @@ func Start(config *Config) (*Server, func(), error) {
 			return nil, nil, err
 		}
 		if err := CheckRedisConnection(redisClient); err != nil {
-			if config.Redis.FallbackToMemory {
+			if needsPendingForwarding {
+				log.Warn("failed to connect to redis; builder submissions will broadcast immediately until persistence succeeds", "err", err)
+			} else if config.Redis.FallbackToMemory {
 				log.Warn("failed to connect to redis, may fall back to in-memory cache", "err", err)
 			} else {
 				return nil, nil, err
@@ -76,7 +88,7 @@ func Start(config *Config) (*Server, func(), error) {
 		}
 
 		if err := CheckRedisConnection(redisClient); err != nil {
-			if config.Redis.FallbackToMemory {
+			if needsPendingForwarding || config.Redis.FallbackToMemory {
 				log.Warn("failed to connect to redis, may fall back to in-memory cache", "err", err)
 			} else {
 				return nil, nil, err
@@ -269,6 +281,7 @@ func Start(config *Config) (*Server, func(), error) {
 			FallbackBackends:       fallbackBackends,
 			routingStrategy:        bg.RoutingStrategy,
 			multicallRPCErrorCheck: bg.MulticallRPCErrorCheck,
+			stagedForwarding:       bg.StagedForwarding,
 		}
 	}
 
@@ -364,6 +377,21 @@ func Start(config *Config) (*Server, func(), error) {
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error creating server: %w", err)
+	}
+
+	// Broadcast all preexisting pending submissions before opening listeners,
+	// with no process lease or periodic runtime transaction scans.
+	for _, bg := range backendGroups {
+		if !bg.stagedForwarding.Enabled {
+			continue
+		}
+		store := newPendingForwardingStore(redisClient, config.Redis.Namespace, bg)
+		bg.pendingForwarding = store
+		InitStagedForwardingMetrics(bg)
+		if err := store.recoverPending(); err != nil {
+			log.Warn("pending forwarding recovery unavailable; continuing with immediate broadcast on persistence failure", "backend_group", bg.Name, "err", err)
+		}
+		store.retryStartupRecovery()
 	}
 
 	// Enable to support browser websocket connections.

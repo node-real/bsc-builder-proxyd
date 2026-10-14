@@ -52,6 +52,147 @@ When an `eth_call` request is received:
 The matching is case-insensitive for both address and value fields. If no `value` is specified in the request, it defaults to "0x0".
 
 
+## Staged builder forwarding
+
+Enable staged forwarding on a `multicall` backend group to give selected builders
+a configurable head start for a deterministic fraction of `eth_sendRawTransaction`
+requests. Policies can be selected by the transaction's signed `from` address:
+
+```toml
+[backend_groups.multicall]
+backends = ["nodereal", "48club", "blockrazor"]
+routing_strategy = "multicall"
+
+[backend_groups.multicall.staged_forwarding]
+enabled = true
+
+[backend_groups.multicall.staged_forwarding.default]
+threshold = 5000
+immediate_backends = ["nodereal"]
+delay = "100ms"
+
+[[backend_groups.multicall.staged_forwarding.groups]]
+name = "partner_senders"
+from_addresses = ["0x1111111111111111111111111111111111111111"]
+threshold = 10000
+immediate_backends = ["48club"]
+delay = "200ms"
+
+[[backend_groups.multicall.staged_forwarding.groups]]
+name = "immediate_senders"
+from_addresses = ["0x2222222222222222222222222222222222222222"]
+threshold = 0
+```
+
+Sender addresses are recovered from the raw transaction signature with the
+transaction's chain ID. Address matching is case-insensitive and groups are
+checked in TOML array order; the first matching group supplies the complete
+policy. Each group has independent `threshold`, `delay` and `immediate_backends`.
+Only transactions that do not match any address group use `default`. A matching
+group's threshold miss means immediate broadcasting, without trying another
+group or default. `threshold = 0` disables the delay for that group and needs no
+delay or immediate builder configuration.
+
+An explicit `default` policy is required when `groups` are configured. Group names
+must be non-empty, unique, and cannot be `default`; malformed or repeated addresses
+within a group are rejected at startup. If an address appears in multiple groups,
+configuration order decides which policy applies. Transactions whose signatures
+cannot yield a sender use `default` and remain subject to upstream validation.
+`eth_sendBundle` always uses normal immediate multicall forwarding and does not
+enter the address-group or default delay policy.
+
+For compatibility, the previous flat `threshold`, `delay` and `immediate_backends`
+under `[backend_groups.<name>.staged_forwarding]` still act as the default raw
+transaction policy when no `default` or `groups` are configured. Do not combine
+these legacy flat fields with the new nested `default` configuration.
+
+Enabling staged forwarding requires a primary Redis URL in `[redis]`.
+Use the same `redis.namespace` and backend group name across process restarts and
+replicas that share the same builder configuration:
+
+```toml
+[redis]
+url = "$REDIS_URL"
+namespace = "builder-proxy"
+```
+
+For `eth_sendRawTransaction`, the routing hash is the canonical transaction hash.
+The full hash is interpreted as an unsigned big-endian integer; requests where
+`hash % 10000 < threshold` go immediately to `immediate_backends`, and to the other
+eligible builders after `delay`. Nonmatching requests go to all eligible builders
+immediately. `threshold = 0` selects none; `threshold = 10000` selects all.
+
+The first successful response is returned as usual, without waiting for delayed
+builders. Delayed forwarding continues after the client request completes or is
+cancelled. Backend health filtering and retries follow existing multicall behavior;
+if no immediate builder is eligible, the request waits for the delayed builders.
+Malformed submissions whose hash cannot be calculated use normal immediate
+forwarding and upstream validation.
+
+The feature is disabled by default. Each policy with `threshold > 0` requires a
+positive delay and a non-empty proper subset of the backend group's builders in
+`immediate_backends`. With the feature enabled, JSON-RPC batches are forwarded as
+individual requests, so each raw transaction gets its own policy and schedule.
+WebSocket routing is unaffected.
+
+Every transaction or bundle submission in an enabled group first attempts to save
+to a separate Redis pending queue **before any builder is contacted**, including submissions
+that do not match the sampling threshold. The queue uses the primary Redis client,
+independently of the RPC response cache. Only a confirmed successful write enables
+the raw transaction's staged forwarding policy. On a Redis error or timeout,
+the submission is broadcast immediately to **all configured builders**,
+bypassing sampling, delay and health filtering. Builder responses determine the RPC
+result as usual. Redis operations respect context deadlines (up to 20 milliseconds for
+pending operations) in both standalone and cluster modes; fallback begins after
+the write attempt fails. This behavior is independent of `fallback_to_memory`.
+
+Each pending record retains the complete RPC request, including raw signed
+transaction bytes in `params`, and forwarding headers in an individual Redis
+string with a **30-minute TTL from its first successful write**. Startup broadcasts
+preserve the remaining TTL; new submissions do not extend older records. Records
+are deleted early after every configured builder has returned an RPC response.
+A JSON-RPC rejection, including an expired bundle or already-known
+transaction, counts as completed delivery. Transport failures or skipped unhealthy
+builders leave the record pending for the next Pod startup until its TTL expires.
+
+Keys share the prefix `<redis.namespace>:staged_forwarding:{<hex backend group name>}`:
+`:record:<request ID>` stores the full payload, `:pending_index` is a sorted-set
+index of record IDs and expiry times. There are no process leases, owner keys or
+heartbeats. The index also expires 30 minutes after its last new record and
+expired entries are removed on writes, successful completions and startup recovery.
+Old `:pending` hash records are
+atomically migrated to the new format before recovery, with 30 minutes of retention
+from migration, preserving their complete requests and headers.
+
+Before opening its RPC listeners, proxyd checks Redis and broadcasts **all
+preexisting, unexpired pending records** in each enabled backend group's namespace
+to **all builders immediately**, bypassing sampling, delay and health filtering.
+This also intentionally advances existing queued submissions from other live
+replicas sharing the same namespace and backend group. The startup
+scan uses a fixed cutoff so concurrent new submissions retain their normal policy.
+This can make startup wait for the recovery broadcasts.
+
+After startup recovery finishes, the instance never scans or reads queued
+transaction payloads during normal operation. It only writes new requests and
+deletes records after a complete successful broadcast. Failed deliveries and
+failed cleanup remain available for the next startup, bounded by the record TTL.
+If Redis is unavailable during startup, proxyd still starts and uses immediate
+broadcast whenever persistence fails. It retries only the interrupted startup
+recovery pass every second and stops that task once the scan succeeds. Subsequent
+successful writes use the configured policy; new submissions received during
+startup recovery retain their own forwarding schedule.
+
+Recovery provides at-least-once delivery while the Redis records remain available:
+a crash after sending but before deleting the record, or simultaneous Pod startups,
+can cause duplicate broadcasts. There is no distributed claim or lease coordination.
+The recovery guarantee depends on retaining the Redis data and using the same
+namespace and enabled backend group configuration on restart within the record's
+30-minute retention window. Failed deliveries remain in Redis until a later attempt
+receives responses from all builders or the record expires.
+During a Redis outage, submissions that were not persisted have no durable restart
+recovery guarantee: immediate broadcasting minimizes the interruption, but a
+process crash before sending to every builder can still lose unsent deliveries.
+
 ## Usage
 
 Run `make proxyd` to build the binary. No additional dependencies are necessary.
@@ -135,6 +276,58 @@ Cache use Redis and can be enabled for the following immutable methods:
 See `metrics.go` for a list of all available metrics.
 
 The metrics port is configurable via the `metrics.port` and `metrics.host` keys in the config.
+
+Enable the Prometheus endpoint for staged forwarding monitoring:
+
+```toml
+[metrics]
+enabled = true
+host = "0.0.0.0"
+port = 9761
+```
+
+Scrape `/metrics` on that port. The following metrics distinguish submitted
+requests, per-builder forwarding, live delay timers and durable recovery:
+
+| Metric | Labels | Counting rule |
+| --- | --- | --- |
+| `proxyd_staged_forwarding_redis_fallback_requests_total` | `backend_group`, `method_name` | One per transaction or bundle request broadcast immediately to all configured builders because Redis persistence failed. These requests do not increment delay metrics. |
+| `proxyd_staged_forwarding_requests_total` | `backend_group`, `method_name`, `policy_group` | One per raw transaction request matching its selected policy's threshold after Redis persistence succeeds. |
+| `proxyd_staged_forwarding_delayed_forwards_total` | `backend_group`, `backend_name`, `method_name`, `policy_group` | One when a delayed builder's timer expires and forwarding starts. Excludes immediate builders, backend retries and recovery broadcasts; does not imply builder acceptance. |
+| `proxyd_staged_forwarding_waiting_requests` | `backend_group`, `method_name`, `policy_group` | Requests in this process with at least one builder still waiting for its delay. Each request counts once even if multiple builders are waiting. Decreases when the last timer expires, before network forwarding completes. |
+| `proxyd_pending_forwarding_recovery_requests_total` | `backend_group`, `method_name` | One per decoded pending record broadcast during startup recovery. Repeated attempts or simultaneous startups count again. |
+| `proxyd_pending_forwarding_records` | `backend_group` | Redis `ZCARD` of the shared pending index after expired entries are removed, including active submissions and failed sends. Sampled on saves, successful completions and startup recovery. |
+
+`policy_group` is the matched group name or `default`. Delay metrics only count
+`eth_sendRawTransaction`; `method_name` on the Redis recovery counter still
+distinguishes transactions from bundles, with a bundle counting as one request.
+For one selected request sent immediately to one builder and after a delay to
+two others, the selected-request counter increases by one, the delayed-forward
+counter increases by two in total, and the waiting gauge changes from one to zero.
+Counters measure submission/forwarding events, not distinct transaction hashes.
+
+Example PromQL for selected requests over the last hour:
+
+```promql
+sum by (backend_group, policy_group, method_name) (
+  increase(proxyd_staged_forwarding_requests_total[1h])
+)
+```
+
+For the current number of requests still waiting across replicas, sum
+`proxyd_staged_forwarding_waiting_requests`. Replicas sharing a Redis namespace
+and backend group report the same Redis queue size: use `max`, not `sum`, for
+`proxyd_pending_forwarding_records`, filtering to the same service and namespace:
+
+```promql
+max by (backend_group) (proxyd_pending_forwarding_records)
+```
+
+There are no periodic runtime queue-size reads. The pending gauge reports the
+last successful write/completion/startup sample and can remain stale during idle
+periods as records expire. On a Redis sampling error the last successful gauge value
+is retained and `proxyd_redis_errors_total{source="PendingForwardingMetrics"}`
+is incremented.
 
 ## Adding Backend SSL Certificates in Docker
 

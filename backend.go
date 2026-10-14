@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -760,6 +761,8 @@ type BackendGroup struct {
 	FallbackBackends       map[string]bool
 	routingStrategy        RoutingStrategy
 	multicallRPCErrorCheck bool
+	stagedForwarding       StagedForwardingConfig
+	pendingForwarding      *pendingForwardingStore
 }
 
 func (bg *BackendGroup) GetRoutingStrategy() RoutingStrategy {
@@ -791,6 +794,23 @@ func (bg *BackendGroup) Primaries() []*Backend {
 func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool) ([]*RPCRes, string, error) {
 	if len(rpcReqs) == 0 {
 		return nil, "", nil
+	}
+
+	// Submission requests in batches need individual hashes and forwarding
+	// schedules. Keep the existing batch behavior when the feature is disabled.
+	if bg.stagedForwarding.Enabled && bg.GetRoutingStrategy() == MulticallRoutingStrategy && isBatch {
+		responses := make([]*RPCRes, 0, len(rpcReqs))
+		servedBy := make([]string, 0, len(rpcReqs))
+		for _, req := range rpcReqs {
+			res, backend, err := bg.Forward(ctx, []*RPCReq{req}, false)
+			if err != nil {
+				responses = append(responses, NewRPCErrorRes(req.ID, err))
+			} else {
+				responses = append(responses, res...)
+			}
+			servedBy = append(servedBy, backend)
+		}
+		return responses, strings.Join(servedBy, ","), nil
 	}
 
 	backends := bg.orderedBackendsForRequest()
@@ -857,6 +877,18 @@ type multicallTuple struct {
 
 // Note: rpcReqs should only contain 1 request of 'sendRawTransactions'
 func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq) *BackendGroupRPCResponse {
+	var pending *pendingRecord
+	redisFallback := false
+	if bg.pendingForwarding != nil && isValidMulticallTx(rpcReqs) {
+		var err error
+		pending, err = bg.pendingForwarding.save(ctx, rpcReqs[0])
+		if err != nil {
+			RecordRedisError("PendingForwardingSave")
+			stagedForwardingRedisFallbackRequestsTotal.WithLabelValues(bg.Name, rpcReqs[0].Method).Inc()
+			log.Warn("cannot persist builder submission; broadcasting immediately to all builders", "backend_group", bg.Name, "err", err)
+			redisFallback = true
+		}
+	}
 	// Create ctx without cancel so background tasks process
 	// after original request returns
 	bgCtx := context.WithoutCancel(ctx)
@@ -868,7 +900,7 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 	var wg sync.WaitGroup
 	targets := make([]*Backend, 0, len(bg.Backends))
 	for _, backend := range bg.Backends {
-		if backend.IsHealthy() {
+		if redisFallback || backend.IsHealthy() {
 			targets = append(targets, backend)
 			continue
 		}
@@ -886,9 +918,45 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 		targets = bg.Backends
 	}
 	ch := make(chan *multicallTuple, len(targets))
+	var failed atomic.Bool
+	if len(targets) != len(bg.Backends) {
+		failed.Store(true)
+	}
+	var plan stagedForwardingPlan
+	if !redisFallback {
+		plan = bg.multicallPlan(rpcReqs)
+	}
+	delay := plan.delay
+	delayedUntil := time.Now().Add(delay)
+	var waiting atomic.Int32
+	if delay > 0 {
+		RecordStagedForwardingRequest(bg, rpcReqs[0].Method, plan.policyGroup)
+		for _, backend := range targets {
+			if !plan.isImmediateBackend(backend.Name) {
+				waiting.Add(1)
+			}
+		}
+		if waiting.Load() > 0 {
+			RecordStagedForwardingWaiting(bg, rpcReqs[0].Method, plan.policyGroup, 1)
+		}
+	}
 	for _, backend := range targets {
 		wg.Add(1)
-		go bg.MulticallRequest(backend, rpcReqs, &wg, bgCtx, ch)
+		go func(backend *Backend) {
+			defer wg.Done()
+			if delay > 0 && !plan.isImmediateBackend(backend.Name) {
+				timer := time.NewTimer(time.Until(delayedUntil))
+				defer timer.Stop()
+				<-timer.C
+				if waiting.Add(-1) == 0 {
+					RecordStagedForwardingWaiting(bg, rpcReqs[0].Method, plan.policyGroup, -1)
+				}
+				RecordStagedForwardingDelayedForward(bg, backend.Name, rpcReqs[0].Method, plan.policyGroup)
+			}
+			if !bg.multicallRequest(backend, rpcReqs, bgCtx, ch) {
+				failed.Store(true)
+			}
+		}(backend)
 	}
 
 	go func() {
@@ -898,6 +966,9 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 			"auth", GetAuthCtx(bgCtx),
 		)
 		close(ch)
+		if pending != nil {
+			bg.pendingForwarding.finish(pending, len(targets) > 0 && !failed.Load())
+		}
 	}()
 
 	return bg.ProcessMulticallResponses(ch, bgCtx)
@@ -905,6 +976,10 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 
 func (bg *BackendGroup) MulticallRequest(backend *Backend, rpcReqs []*RPCReq, wg *sync.WaitGroup, ctx context.Context, ch chan *multicallTuple) {
 	defer wg.Done()
+	bg.multicallRequest(backend, rpcReqs, ctx, ch)
+}
+
+func (bg *BackendGroup) multicallRequest(backend *Backend, rpcReqs []*RPCReq, ctx context.Context, ch chan *multicallTuple) bool {
 	log.Debug("forwarding multicall request to backend",
 		"req_id", GetReqID(ctx),
 		"auth", GetAuthCtx(ctx),
@@ -944,6 +1019,9 @@ func (bg *BackendGroup) MulticallRequest(backend *Backend, rpcReqs []*RPCReq, wg
 	} else {
 		RecordBackendGroupMulticallCompletion(bg, backend.Name, "nil")
 	}
+	// A JSON-RPC rejection (e.g. an expired bundle or already-known tx) is a
+	// completed delivery. Transport failures remain pending for recovery.
+	return backendResp.error == nil && len(backendResp.RPCRes) == 1
 }
 
 func (bg *BackendGroup) ProcessMulticallResponses(ch chan *multicallTuple, ctx context.Context) *BackendGroupRPCResponse {
@@ -1103,6 +1181,9 @@ func (bg *BackendGroup) loadBalancedConsensusGroup() []*Backend {
 }
 
 func (bg *BackendGroup) Shutdown() {
+	if bg.pendingForwarding != nil {
+		bg.pendingForwarding.stop()
+	}
 	if bg.Consensus != nil {
 		bg.Consensus.Shutdown()
 	}
