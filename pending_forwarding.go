@@ -312,8 +312,8 @@ func (s *pendingForwardingStore) broadcast(submission pendingSubmission) bool {
 	var wg sync.WaitGroup
 	ch := make(chan *multicallTuple, len(s.group.Backends))
 	// Recovery bypasses sampling, delay and health filtering to attempt every
-	// configured builder, including builders that were skipped on the first pass.
-	for _, backend := range s.group.Backends {
+	// domain-eligible builder, including unhealthy builders skipped on the first pass.
+	for _, backend := range s.group.submissionBackends(ctx, []*RPCReq{submission.Request}) {
 		wg.Add(1)
 		go func(backend *Backend) {
 			defer wg.Done()

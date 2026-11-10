@@ -137,6 +137,7 @@ func ErrInvalidParams(msg string) *RPCErr {
 
 type Backend struct {
 	Name                 string
+	domainBlacklist      []string
 	rpcURL               string
 	receiptsTarget       string
 	wsURL                string
@@ -797,8 +798,8 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 	}
 
 	// Submission requests in batches need individual hashes and forwarding
-	// schedules. Keep the existing batch behavior when the feature is disabled.
-	if bg.stagedForwarding.Enabled && bg.GetRoutingStrategy() == MulticallRoutingStrategy && isBatch {
+	// schedules. Domain filtering also requires separating submissions from queries.
+	if isBatch && ((bg.stagedForwarding.Enabled && bg.GetRoutingStrategy() == MulticallRoutingStrategy) || bg.hasDomainFilteredSubmission(ctx, rpcReqs)) {
 		responses := make([]*RPCRes, 0, len(rpcReqs))
 		servedBy := make([]string, 0, len(rpcReqs))
 		for _, req := range rpcReqs {
@@ -877,6 +878,10 @@ type multicallTuple struct {
 
 // Note: rpcReqs should only contain 1 request of 'sendRawTransactions'
 func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq) *BackendGroupRPCResponse {
+	eligible := bg.submissionBackends(ctx, rpcReqs)
+	if len(eligible) == 0 && len(bg.Backends) > 0 {
+		return &BackendGroupRPCResponse{RPCRes: skippedSubmissionResponses(rpcReqs)}
+	}
 	var pending *pendingRecord
 	redisFallback := false
 	if bg.pendingForwarding != nil && isValidMulticallTx(rpcReqs) {
@@ -885,7 +890,7 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 		if err != nil {
 			RecordRedisError("PendingForwardingSave")
 			stagedForwardingRedisFallbackRequestsTotal.WithLabelValues(bg.Name, rpcReqs[0].Method).Inc()
-			log.Warn("cannot persist builder submission; broadcasting immediately to all builders", "backend_group", bg.Name, "err", err)
+			log.Warn("cannot persist builder submission; broadcasting immediately to all eligible builders", "backend_group", bg.Name, "err", err)
 			redisFallback = true
 		}
 	}
@@ -899,7 +904,7 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 	)
 	var wg sync.WaitGroup
 	targets := make([]*Backend, 0, len(bg.Backends))
-	for _, backend := range bg.Backends {
+	for _, backend := range eligible {
 		if redisFallback || backend.IsHealthy() {
 			targets = append(targets, backend)
 			continue
@@ -915,11 +920,11 @@ func (bg *BackendGroup) ExecuteMulticall(ctx context.Context, rpcReqs []*RPCReq)
 			"req_id", GetReqID(bgCtx),
 			"auth", GetAuthCtx(bgCtx),
 		)
-		targets = bg.Backends
+		targets = eligible
 	}
 	ch := make(chan *multicallTuple, len(targets))
 	var failed atomic.Bool
-	if len(targets) != len(bg.Backends) {
+	if len(targets) != len(eligible) {
 		failed.Store(true)
 	}
 	var plan stagedForwardingPlan
@@ -1077,7 +1082,20 @@ func (bg *BackendGroup) ProcessMulticallResponses(ch chan *multicallTuple, ctx c
 }
 
 func (bg *BackendGroup) ProxyWS(ctx context.Context, clientConn *websocket.Conn, methodWhitelist *StringSet) (*WSProxier, error) {
+	// Prefer an unfiltered backend so the same connection can submit transactions.
+	// If all are filtered, queries still work and submissions are acknowledged as skipped.
+	backends := make([]*Backend, 0, len(bg.Backends))
 	for _, back := range bg.Backends {
+		if !back.isDomainBlacklisted(ctx) {
+			backends = append(backends, back)
+		}
+	}
+	for _, back := range bg.Backends {
+		if back.isDomainBlacklisted(ctx) {
+			backends = append(backends, back)
+		}
+	}
+	for _, back := range backends {
 		proxier, err := back.ProxyWS(clientConn, methodWhitelist)
 		if errors.Is(err, ErrBackendOffline) {
 			log.Warn(
@@ -1275,6 +1293,15 @@ func (w *WSProxier) clientPump(ctx context.Context, errC chan error) {
 			// Send error response to client
 			err = w.writeClientConn(msgType, msg)
 			if err != nil {
+				errC <- err
+				return
+			}
+			continue
+		}
+
+		if w.backend.shouldSkipSubmission(ctx, []*RPCReq{req}) {
+			w.backend.logDomainSkip(ctx, "", req.Method)
+			if err := w.writeClientConn(msgType, mustMarshalJSON(NewRPCRes(req.ID, nil))); err != nil {
 				errC <- err
 				return
 			}
@@ -1532,7 +1559,13 @@ func (bg *BackendGroup) ForwardRequestToBackendGroup(
 	ctx context.Context,
 	isBatch bool,
 ) *BackendGroupRPCResponse {
+	skipped := 0
 	for _, back := range backends {
+		if back.shouldSkipSubmission(ctx, rpcReqs) {
+			back.logDomainSkip(ctx, bg.Name, rpcReqs[0].Method)
+			skipped++
+			continue
+		}
 		res := make([]*RPCRes, 0)
 		var err error
 
@@ -1595,6 +1628,9 @@ func (bg *BackendGroup) ForwardRequestToBackendGroup(
 		}
 	}
 
+	if skipped > 0 && skipped == len(backends) {
+		return &BackendGroupRPCResponse{RPCRes: skippedSubmissionResponses(rpcReqs)}
+	}
 	RecordUnserviceableRequest(ctx, RPCRequestSourceHTTP)
 	return &BackendGroupRPCResponse{
 		RPCRes:   nil,

@@ -138,7 +138,7 @@ func Start(config *Config) (*Server, func(), error) {
 	backendNames := make([]string, 0)
 	backendsByName := make(map[string]*Backend)
 	for name, cfg := range config.Backends {
-		opts := make([]BackendOpt, 0)
+		opts := []BackendOpt{WithDomainBlacklist(cfg.DomainBlacklist)}
 
 		rpcURL, err := ReadFromEnvOrConfig(cfg.RPCURL)
 		if err != nil {

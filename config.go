@@ -105,6 +105,8 @@ type BackendOptions struct {
 }
 
 type BackendConfig struct {
+	// DomainBlacklist filters transaction submissions to this backend.
+	DomainBlacklist  []string          `toml:"domain_blacklist"`
 	Username         string            `toml:"username"`
 	Password         string            `toml:"password"`
 	RPCURL           string            `toml:"rpc_url"`

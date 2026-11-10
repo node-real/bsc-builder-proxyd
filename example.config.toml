@@ -81,6 +81,11 @@ rpc_url = "https://bsc-mainnet-builder.nodereal.io"
 
 [backends.48club]
 rpc_url = "https://puissant-builder.48.club/"
+# Skip transaction submissions from these domains to this side backend.
+# Other backends still return their actual responses; ordinary queries are unaffected.
+# Exact hostnames, case-insensitive; ports and trailing dots are ignored.
+# X-Forwarded-Host takes precedence over Host.
+# domain_blacklist = ["blocked.example.com"]
 
 [backends.blockrazor]
 rpc_url = "https://rpc.blockrazor.builders/"
@@ -113,11 +118,11 @@ routing_strategy = "multicall"
 # Disabled by default. Delay policies apply only to eth_sendRawTransaction,
 # including submissions inside JSON-RPC batches. Bundles are sent immediately.
 # When enabled, every submission is saved to Redis before forwarding. On restart,
-# recoverable pending submissions are broadcast to all builders without delay.
+# recoverable pending submissions are broadcast to all domain-eligible builders without delay.
 # Only startup recovery reads and broadcasts queued transactions; there are no process leases.
 # An interrupted startup scan is retried until it succeeds, then the task stops.
 # Each complete transaction request is retained for 30min from its first write.
-# Pending Redis operations time out after 20ms; failures broadcast to all builders immediately.
+# Pending Redis operations time out after 20ms; failures broadcast to all domain-eligible builders immediately.
 enabled = false
 
 [backend_groups.multicall.staged_forwarding.default]

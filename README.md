@@ -52,6 +52,48 @@ When an `eth_call` request is received:
 The matching is case-insensitive for both address and value fields. If no `value` is specified in the request, it defaults to "0x0".
 
 
+## Backend domain blacklist
+
+Configure `domain_blacklist` on a side backend to exclude that backend from
+transaction submissions originating from specific domains:
+
+```toml
+[backends.nodereal]
+rpc_url = "https://bsc-mainnet-builder.nodereal.io"
+
+[backends.side_builder]
+rpc_url = "https://side-builder.example.com"
+domain_blacklist = ["blocked.example.com", "another.example.com"]
+
+[backend_groups.multicall]
+backends = ["nodereal", "side_builder"]
+routing_strategy = "multicall"
+```
+
+This applies to `eth_sendRawTransaction` and `eth_sendBundle` over HTTP (including
+batches). A matching side backend is skipped without producing an RPC error;
+remaining backends continue to return their actual responses. Ordinary queries
+are unaffected. The setting follows the backend wherever it appears in a group.
+
+Domain filtering takes precedence over delayed forwarding, unhealthy-backend
+fallback and Redis-failure immediate broadcasting. An intentionally skipped
+backend does not prevent successful delivery to the remaining backends from
+clearing the Redis pending record. Startup recovery applies the current blacklist
+and broadcasts only to eligible backends.
+
+WebSocket connections prefer an eligible backend. If all available backends are
+filtered, queries can still use the connection while transaction submissions are
+acknowledged as skipped with `result: null`. HTTP submissions also return
+`result: null` with status 200 if every backend is filtered, without attempting
+delivery or persisting a pending record. This is a skipped side request, not
+acceptance of the transaction by a builder; leave the primary backend unfiltered.
+
+Matching uses the first `X-Forwarded-Host` entry, falling back to the HTTP Host
+when that header is absent. Matching is case-insensitive, ignores ports and a
+trailing dot, and requires an exact hostname; subdomains and wildcards are not
+implicitly matched. Configure the blacklist with hostnames, not URLs. As with
+domain routing, the ingress must supply a trusted `X-Forwarded-Host`.
+
 ## Staged builder forwarding
 
 Enable staged forwarding on a `multicall` backend group to give selected builders
@@ -140,7 +182,7 @@ to a separate Redis pending queue **before any builder is contacted**, including
 that do not match the sampling threshold. The queue uses the primary Redis client,
 independently of the RPC response cache. Only a confirmed successful write enables
 the raw transaction's staged forwarding policy. On a Redis error or timeout,
-the submission is broadcast immediately to **all configured builders**,
+the submission is broadcast immediately to **all domain-eligible builders**,
 bypassing sampling, delay and health filtering. Builder responses determine the RPC
 result as usual. Redis operations respect context deadlines (up to 20 milliseconds for
 pending operations) in both standalone and cluster modes; fallback begins after
@@ -150,7 +192,7 @@ Each pending record retains the complete RPC request, including raw signed
 transaction bytes in `params`, and forwarding headers in an individual Redis
 string with a **30-minute TTL from its first successful write**. Startup broadcasts
 preserve the remaining TTL; new submissions do not extend older records. Records
-are deleted early after every configured builder has returned an RPC response.
+are deleted early after every domain-eligible builder has returned an RPC response.
 A JSON-RPC rejection, including an expired bundle or already-known
 transaction, counts as completed delivery. Transport failures or skipped unhealthy
 builders leave the record pending for the next Pod startup until its TTL expires.
@@ -166,7 +208,7 @@ from migration, preserving their complete requests and headers.
 
 Before opening its RPC listeners, proxyd checks Redis and broadcasts **all
 preexisting, unexpired pending records** in each enabled backend group's namespace
-to **all builders immediately**, bypassing sampling, delay and health filtering.
+to **all domain-eligible builders immediately**, bypassing sampling, delay and health filtering.
 This also intentionally advances existing queued submissions from other live
 replicas sharing the same namespace and backend group. The startup
 scan uses a fixed cutoff so concurrent new submissions retain their normal policy.
@@ -188,7 +230,7 @@ can cause duplicate broadcasts. There is no distributed claim or lease coordinat
 The recovery guarantee depends on retaining the Redis data and using the same
 namespace and enabled backend group configuration on restart within the record's
 30-minute retention window. Failed deliveries remain in Redis until a later attempt
-receives responses from all builders or the record expires.
+receives responses from all domain-eligible builders or the record expires.
 During a Redis outage, submissions that were not persisted have no durable restart
 recovery guarantee: immediate broadcasting minimizes the interruption, but a
 process crash before sending to every builder can still lose unsent deliveries.
@@ -291,7 +333,7 @@ requests, per-builder forwarding, live delay timers and durable recovery:
 
 | Metric | Labels | Counting rule |
 | --- | --- | --- |
-| `proxyd_staged_forwarding_redis_fallback_requests_total` | `backend_group`, `method_name` | One per transaction or bundle request broadcast immediately to all configured builders because Redis persistence failed. These requests do not increment delay metrics. |
+| `proxyd_staged_forwarding_redis_fallback_requests_total` | `backend_group`, `method_name` | One per transaction or bundle request broadcast immediately to all domain-eligible builders because Redis persistence failed. These requests do not increment delay metrics. |
 | `proxyd_staged_forwarding_requests_total` | `backend_group`, `method_name`, `policy_group` | One per raw transaction request matching its selected policy's threshold after Redis persistence succeeds. |
 | `proxyd_staged_forwarding_delayed_forwards_total` | `backend_group`, `backend_name`, `method_name`, `policy_group` | One when a delayed builder's timer expires and forwarding starts. Excludes immediate builders, backend retries and recovery broadcasts; does not imply builder acceptance. |
 | `proxyd_staged_forwarding_waiting_requests` | `backend_group`, `method_name`, `policy_group` | Requests in this process with at least one builder still waiting for its delay. Each request counts once even if multiple builders are waiting. Decreases when the last timer expires, before network forwarding completes. |

@@ -464,7 +464,7 @@ var (
 	stagedForwardingRedisFallbackRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: MetricsNamespace,
 		Name:      "staged_forwarding_redis_fallback_requests_total",
-		Help:      "Submission requests broadcast immediately to all configured builders after Redis persistence fails.",
+		Help:      "Submission requests broadcast immediately to all domain-eligible builders after Redis persistence fails.",
 	}, []string{"backend_group", "method_name"})
 
 	stagedForwardingRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
