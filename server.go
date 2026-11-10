@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -545,6 +546,8 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 			}
 		}
 
+		logTxBundleArrival(parsedReq, origin)
+
 		id := string(parsedReq.ID)
 		// If this is a duplicate Request ID, move the Request to a new batchGroup
 		ids[id]++
@@ -1027,4 +1030,40 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// logTxBundleArrival logs the arrival timestamp of eth_sendRawTransaction and
+// eth_sendBundle requests. For bundles it also lists the tx hashes decoded from
+// the raw RLP-encoded transactions in the bundle params.
+func logTxBundleArrival(req *RPCReq, domain string) {
+	now := time.Now().UnixMilli()
+	switch req.Method {
+	case "eth_sendRawTransaction":
+		var params []hexutil.Bytes
+		if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
+			return
+		}
+		tx := new(types.Transaction)
+		if err := tx.UnmarshalBinary(params[0]); err != nil {
+			return
+		}
+		log.Info("Tx arrival", "ts_ms", now, "domain", domain, "hash", tx.Hash())
+
+	case "eth_sendBundle":
+		var params []struct {
+			Txs []hexutil.Bytes `json:"txs"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
+			return
+		}
+		hashes := make([]common.Hash, 0, len(params[0].Txs))
+		for _, raw := range params[0].Txs {
+			tx := new(types.Transaction)
+			if err := tx.UnmarshalBinary(raw); err != nil {
+				continue
+			}
+			hashes = append(hashes, tx.Hash())
+		}
+		log.Info("Bundle arrival", "ts_ms", now, "domain", domain, "tx_count", len(hashes), "txs", hashes)
+	}
 }
